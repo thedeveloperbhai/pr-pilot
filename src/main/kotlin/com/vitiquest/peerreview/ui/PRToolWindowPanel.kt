@@ -60,6 +60,9 @@ class PRToolWindowPanel(private val project: Project) : JPanel(BorderLayout()) {
     // prId → number of changed files (populated when diff is fetched)
     private val prFileCount = mutableMapOf<Int, Int>()
 
+    // filePath → open diff Window, so clicking the same file twice focuses instead of duplicating
+    private val openDiffWindows = mutableMapOf<String, Window>()
+
     // ── status bar (shared across both views) ─────────────────────────────────
     private val statusLabel = JBLabel("Ready")
 
@@ -345,6 +348,7 @@ class PRToolWindowPanel(private val project: Project) : JPanel(BorderLayout()) {
     // =========================================================================
 
     private fun showPrListView() {
+        openDiffWindows.clear()
         cardLayout.show(cardPanel, CARD_PR_LIST)
         setStatus("${listModel.size()} PR(s) loaded.")
     }
@@ -440,9 +444,18 @@ class PRToolWindowPanel(private val project: Project) : JPanel(BorderLayout()) {
     // =========================================================================
 
     private fun openFileDiff(entry: FileDiffEntry) {
-        val pr      = currentPr ?: return
-        val factory = DiffContentFactory.getInstance()
+        val pr = currentPr ?: return
 
+        // If a window for this file is already open, focus it instead of opening a new one
+        val cacheKey = "${pr.id}::${entry.displayLabel}"
+        val existing = openDiffWindows[cacheKey]
+        if (existing != null && existing.isDisplayable && existing.isVisible) {
+            existing.toFront()
+            existing.requestFocus()
+            return
+        }
+
+        val factory = DiffContentFactory.getInstance()
         val leftContent  = factory.create(project, entry.oldText)
         val rightContent = factory.create(project, entry.newText)
 
@@ -460,7 +473,30 @@ class PRToolWindowPanel(private val project: Project) : JPanel(BorderLayout()) {
             leftContent, rightContent,
             leftTitle,   rightTitle
         )
+
+        // Show the diff — then locate the newly created window and cache it
         DiffManager.getInstance().showDiff(project, request, DiffDialogHints.DEFAULT)
+
+        // The diff dialog is shown modally on EDT; find it by title in the Window list
+        val title = "PR #${pr.id}  —  ${entry.displayLabel}"
+        Window.getWindows()
+            .firstOrNull { w -> w.isVisible && windowTitle(w) == title }
+            ?.let { w ->
+                openDiffWindows[cacheKey] = w
+                // Clean up cache when the window is closed
+                w.addWindowListener(object : java.awt.event.WindowAdapter() {
+                    override fun windowClosed(e: java.awt.event.WindowEvent) {
+                        openDiffWindows.remove(cacheKey)
+                    }
+                })
+            }
+    }
+
+    /** Extract the title from a Window (works for JDialog and JFrame). */
+    private fun windowTitle(w: Window): String = when (w) {
+        is java.awt.Dialog -> w.title
+        is java.awt.Frame  -> w.title
+        else               -> ""
     }
 
     // =========================================================================
