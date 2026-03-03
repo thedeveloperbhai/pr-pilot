@@ -74,6 +74,7 @@ class PRToolWindowPanel(private val project: Project) : JPanel(BorderLayout()) {
     private val fileListModel = DefaultListModel<FileDiffEntry>()
     private val fileList      = JBList(fileListModel)
     private val breadcrumbBar = JPanel(BorderLayout())   // "← Back  •  PR #42 — title"
+    private val statsBar      = JPanel(BorderLayout())   // "● N modified  ● N added  ● N deleted"
 
     // ── Card layout ───────────────────────────────────────────────────────────
     private val cardLayout   = CardLayout()
@@ -184,14 +185,26 @@ class PRToolWindowPanel(private val project: Project) : JPanel(BorderLayout()) {
     // ── View 2: File list ─────────────────────────────────────────────────────
 
     private fun buildFileListView(): JPanel {
-        // Pre-populate breadcrumbBar with a working back button immediately.
-        // updateBreadcrumb() will rebuild this content with full PR info when a PR is selected.
         breadcrumbBar.apply {
             border     = MatteBorder(0, 0, 1, 0, JBColor.border())
             background = JBColor.PanelBackground
             isOpaque   = true
         }
+        statsBar.apply {
+            border     = MatteBorder(0, 0, 1, 0, JBColor.border())
+            background = JBColor.PanelBackground
+            isOpaque   = true
+            isVisible  = false   // hidden until a PR diff is loaded
+        }
         populateInitialBreadcrumb()
+
+        // North compound: breadcrumb + stats bar stacked vertically
+        val northPanel = JPanel().apply {
+            layout     = BoxLayout(this, BoxLayout.Y_AXIS)
+            isOpaque   = false
+            add(breadcrumbBar)
+            add(statsBar)
+        }
 
         // file list
         fileList.cellRenderer = FileEntryRenderer()
@@ -218,9 +231,9 @@ class PRToolWindowPanel(private val project: Project) : JPanel(BorderLayout()) {
 
         return JPanel(BorderLayout()).apply {
             background = JBColor.PanelBackground
-            add(breadcrumbBar, BorderLayout.NORTH)   // breadcrumbBar IS the north bar
-            add(scroll,        BorderLayout.CENTER)
-            add(hintLabel,     BorderLayout.SOUTH)
+            add(northPanel, BorderLayout.NORTH)
+            add(scroll,     BorderLayout.CENTER)
+            add(hintLabel,  BorderLayout.SOUTH)
         }
     }
 
@@ -241,9 +254,11 @@ class PRToolWindowPanel(private val project: Project) : JPanel(BorderLayout()) {
         breadcrumbBar.repaint()
     }
 
-    private fun updateBreadcrumb(pr: PullRequest, fileCount: Int) {
-        breadcrumbBar.removeAll()
+    private fun updateBreadcrumb(pr: PullRequest, entries: List<FileDiffEntry>) {
+        val fileCount = entries.size
 
+        // ── Breadcrumb bar ────────────────────────────────────────────────────
+        breadcrumbBar.removeAll()
         val prLabel = JBLabel("PR #${pr.id}  —  ${pr.title}").apply {
             font       = Font(font.family, Font.BOLD, 12)
             foreground = JBColor.foreground()
@@ -260,8 +275,6 @@ class PRToolWindowPanel(private val project: Project) : JPanel(BorderLayout()) {
             add(prLabel)
             add(branchLabel)
         }
-
-        // Right side: file count chip + state pill
         val fileCountLabel = JBLabel("📄 $fileCount file${if (fileCount == 1) "" else "s"} changed").apply {
             font       = Font(font.family, Font.PLAIN, 11)
             foreground = JBColor.GRAY
@@ -276,6 +289,47 @@ class PRToolWindowPanel(private val project: Project) : JPanel(BorderLayout()) {
         breadcrumbBar.add(rightWrap, BorderLayout.EAST)
         breadcrumbBar.revalidate()
         breadcrumbBar.repaint()
+
+        // ── Stats bar — counts per status ─────────────────────────────────────
+        val modified = entries.count { it.statusTag == "MODIFIED" }
+        val added    = entries.count { it.statusTag == "ADDED"    }
+        val deleted  = entries.count { it.statusTag == "DELETED"  }
+        val renamed  = entries.count { it.statusTag == "RENAMED"  }
+
+        statsBar.removeAll()
+        val chips = JPanel(FlowLayout(FlowLayout.LEFT, 6, 5)).apply {
+            isOpaque = false
+            if (modified > 0) add(statChip("$modified modified", JBColor(Color(0xB45309), Color(0xD29922))))
+            if (added    > 0) add(statChip("$added added",       JBColor(Color(0x166534), Color(0x3FB950))))
+            if (deleted  > 0) add(statChip("$deleted deleted",   JBColor(Color(0x9F1239), Color(0xF85149))))
+            if (renamed  > 0) add(statChip("$renamed renamed",   JBColor(Color(0x0550AE), Color(0x58A6FF))))
+        }
+        statsBar.add(chips, BorderLayout.CENTER)
+        statsBar.isVisible = true
+        statsBar.revalidate()
+        statsBar.repaint()
+    }
+
+    /** Small coloured dot + label chip for the stats bar. */
+    private fun statChip(text: String, color: Color): JPanel {
+        val dot = object : JComponent() {
+            init { preferredSize = Dimension(8, 8); isOpaque = false }
+            override fun paintComponent(g: Graphics) {
+                val g2 = g as Graphics2D
+                g2.setRenderingHint(RenderingHints.KEY_ANTIALIASING, RenderingHints.VALUE_ANTIALIAS_ON)
+                g2.color = color
+                g2.fillOval(0, 0, 8, 8)
+            }
+        }
+        val lbl = JLabel(text).apply {
+            font       = Font(font.family, Font.PLAIN, 11)
+            foreground = color
+        }
+        return JPanel(FlowLayout(FlowLayout.LEFT, 3, 0)).apply {
+            isOpaque = false
+            add(dot)
+            add(lbl)
+        }
     }
 
     private fun makeBackButton() = JButton(AllIcons.Actions.Back).apply {
@@ -298,12 +352,11 @@ class PRToolWindowPanel(private val project: Project) : JPanel(BorderLayout()) {
     private fun showFileListView(pr: PullRequest, entries: List<FileDiffEntry>) {
         currentPr          = pr
         currentFileEntries = entries
-        // Cache file count so PR cards can show it
         prFileCount[pr.id] = entries.size
         prList.repaint()
         fileListModel.clear()
         entries.forEach { fileListModel.addElement(it) }
-        updateBreadcrumb(pr, entries.size)
+        updateBreadcrumb(pr, entries)
         setStatus("${entries.size} file(s) changed in PR #${pr.id}.")
         cardLayout.show(cardPanel, CARD_FILES)
     }
