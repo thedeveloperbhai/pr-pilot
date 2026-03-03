@@ -851,7 +851,9 @@ $contents
 // PR Card Renderer (unchanged visual style)
 // =============================================================================
 
-private class PRCardRenderer : ListCellRenderer<PullRequest> {
+private class PRCardRenderer(
+    private val fileCountCache: Map<Int, Int>
+) : ListCellRenderer<PullRequest> {
     private val DATE_IN  = DateTimeFormatter.ISO_OFFSET_DATE_TIME
     private val DATE_OUT = DateTimeFormatter.ofPattern("MMM dd, yyyy")
 
@@ -881,12 +883,16 @@ private class PRCardRenderer : ListCellRenderer<PullRequest> {
 
         val updatedText = pr.updatedOn.runCatching {
             DATE_OUT.format(DATE_IN.parse(this)) }.getOrElse { pr.updatedOn.take(10) }
+
         val meta = buildString {
             val b = pr.source.branch.name; val d = pr.destination.branch.name
             if (b.isNotBlank() && d.isNotBlank()) append("$b  →  $d")
             if (pr.author.displayName.isNotBlank()) append("   ·   👤 ${pr.author.displayName}")
             if (updatedText.isNotBlank()) append("   ·   🕒 $updatedText")
             if (pr.commentCount > 0) append("   ·   💬 ${pr.commentCount}")
+            fileCountCache[pr.id]?.let { n ->
+                append("   ·   📄 $n file${if (n == 1) "" else "s"}")
+            }
         }
         val metaLbl = JLabel(meta).apply {
             font = Font(font.family, Font.PLAIN, 11); foreground = JBColor.GRAY
