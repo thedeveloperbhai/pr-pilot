@@ -114,4 +114,4 @@ manually via UI.
 
 [jb:ipe]: https://jb.gg/ipe
 
-[jb:ui-guidelines]: https://jetbrains.github.io/ui
+[jb:ui-guidelines]: https://jetbrains.github.io/ui# pr-pilot
