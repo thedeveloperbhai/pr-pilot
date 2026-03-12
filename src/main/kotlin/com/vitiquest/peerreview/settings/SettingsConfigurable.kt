@@ -73,7 +73,7 @@ class SettingsConfigurable : Configurable {
     private val rootCards = CardLayout()
     private val rootPanel = JPanel(rootCards)
 
-    override fun getDisplayName() = "PR Review Assistant"
+    override fun getDisplayName() = "PR Pilot"
 
     override fun createComponent(): JComponent {
         val loadingPanel = JPanel(BorderLayout()).apply {

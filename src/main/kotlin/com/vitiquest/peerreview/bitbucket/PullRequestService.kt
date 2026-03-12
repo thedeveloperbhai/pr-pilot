@@ -24,7 +24,7 @@ class PullRequestService {
     private fun gitHubClient(): GitHubClient {
         val pat = PluginSettings.instance.getGitHubPat()
         require(pat.isNotBlank()) {
-            "GitHub PAT is not configured. Go to Settings → PR Review Assistant."
+            "GitHub PAT is not configured. Go to Settings → PR Pilot."
         }
         return GitHubClient(pat)
     }

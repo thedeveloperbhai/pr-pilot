@@ -1,35 +1,25 @@
 <!-- Plugin Configuration File: https://plugins.jetbrains.com/docs/intellij/plugin-configuration-file.html -->
 <idea-plugin>
-    <!-- Unique identifier of the plugin. It should be FQN, cannot be changed between the plugin versions. -->
     <id>com.vitiquest.peer-review</id>
 
-    <!-- Public plugin name should be written in Title Case.
-         Guidelines: https://plugins.jetbrains.com/docs/marketplace/best-practices-for-listing.html#plugin-name -->
-    <name>PR Review Assistant</name>
+    <name>PR Pilot</name>
 
-    <!-- A displayed Vendor name or Organization ID displayed on the Plugins Page. -->
     <vendor url="https://www.vitiquest.com">Vitiquest</vendor>
 
-    <!-- Description of the plugin displayed on the Plugin Page and IDE Plugin Manager.
-         Guidelines: https://plugins.jetbrains.com/docs/marketplace/best-practices-for-listing.html#plugin-description -->
     <description><![CDATA[
-        <b>PR Review Assistant</b> — Review GitHub and Bitbucket Cloud Pull Requests from within IntelliJ IDEA.<br/>
+        <b>PR Pilot</b> — Review GitHub and Bitbucket Cloud Pull Requests from within IntelliJ IDEA.<br/>
         Features: Browse open PRs, view diffs, generate AI summaries, approve or decline PRs.<br/>
         Supports per-project AI skill files under <code>.idea/pr-pilot/skills/</code>.
     ]]></description>
 
-    <!-- Product and plugin compatibility requirements.
-         Read more: https://plugins.jetbrains.com/docs/intellij/plugin-compatibility.html -->
     <depends>com.intellij.modules.platform</depends>
     <depends>Git4Idea</depends>
 
-    <!-- Extensions defined by the plugin.
-         Read more: https://plugins.jetbrains.com/docs/intellij/plugin-extension-points.html -->
     <extensions defaultExtensionNs="com.intellij">
 
         <!-- Tool Window -->
         <toolWindow
-            id="PR Review"
+            id="PR Pilot"
             anchor="right"
             factoryClass="com.vitiquest.peerreview.ui.PRToolWindowFactory"
             icon="AllIcons.Vcs.Branch"/>
@@ -37,7 +27,6 @@
         <!-- Persistent Settings -->
         <applicationService
             serviceImplementation="com.vitiquest.peerreview.settings.PluginSettings"/>
-
 
         <!-- Skills service (project-scoped — reads .idea/pr-pilot/skills/*.md) -->
         <projectService
@@ -50,13 +39,14 @@
         <!-- Dedicated full-size settings window for the plugin -->
         <applicationConfigurable
             id="com.vitiquest.peerreview.settings.root"
-            displayName="PR Review Assistant"
+            displayName="PR Pilot"
             instance="com.vitiquest.peerreview.settings.PRPilotSettingsConfigurable"/>
 
         <!-- Notification group for balloon messages -->
-        <notificationGroup id="PR Review Assistant"
+        <notificationGroup id="PR Pilot"
                            displayType="BALLOON"
                            isLogByDefault="true"/>
 
     </extensions>
 </idea-plugin>
+

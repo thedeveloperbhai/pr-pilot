@@ -1,1 +1,1 @@
-rootProject.name = "peer-review"
+rootProject.name = "pr-pilot"

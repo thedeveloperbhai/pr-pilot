@@ -12,7 +12,7 @@ enum class AiProvider { OPENAI, OPENAI_COMPATIBLE, OLLAMA }
 enum class GitProvider { BITBUCKET, GITHUB }
 
 /**
- * All plugin settings stored via PersistentStateComponent in PRReviewAssistant.xml.
+ * All plugin settings stored via PersistentStateComponent in PRPilot.xml.
  *
  * RoamingType.DISABLED prevents cloud sync and ensures the file is written
  * to the local config directory.  saveSettings() is called after every write
@@ -22,8 +22,8 @@ enum class GitProvider { BITBUCKET, GITHUB }
  * where PasswordSafe does not reliably persist between restarts.
  */
 @State(
-    name = "PRReviewAssistantSettings",
-    storages = [Storage(value = "PRReviewAssistant.xml", roamingType = RoamingType.DISABLED)]
+    name = "PRPilotSettings",
+    storages = [Storage(value = "PRPilot.xml", roamingType = RoamingType.DISABLED)]
 )
 class PluginSettings : PersistentStateComponent<PluginSettings.State> {
 

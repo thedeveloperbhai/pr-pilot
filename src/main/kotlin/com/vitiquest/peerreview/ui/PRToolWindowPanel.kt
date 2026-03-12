@@ -434,7 +434,7 @@ class PRToolWindowPanel(private val project: Project) : JPanel(BorderLayout()), 
                     val isAuthError = msg.contains("401") || msg.contains("No Access Token") ||
                                       msg.contains("No PAT") || msg.contains("Invalid or expired")
                     val detail = if (isAuthError)
-                        "$msg\n\nTip: Go to Settings → PR Review Assistant → Git Providers and " +
+                        "$msg\n\nTip: Go to Settings → PR Pilot → Git Providers and " +
                         "verify the Access Token for '${info.owner}/${info.repoSlug}'."
                     else msg
                     Messages.showErrorDialog(project, detail, "Load Pull Requests Failed")
@@ -1134,7 +1134,7 @@ class PRToolWindowPanel(private val project: Project) : JPanel(BorderLayout()), 
 
     private fun notify(msg: String, type: NotificationType) {
         NotificationGroupManager.getInstance()
-            .getNotificationGroup("PR Review Assistant")
+            .getNotificationGroup("PR Pilot")
             .createNotification(msg, type).notify(project)
     }
 

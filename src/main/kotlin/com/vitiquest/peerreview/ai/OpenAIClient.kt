@@ -60,7 +60,7 @@ class OpenAIClient(private val project: Project? = null) {
     private fun callOpenAi(userPrompt: String, s: PluginSettings, prContext: PrContext? = null): String {
         val apiKey = s.getOpenAiKey()
         require(apiKey.isNotBlank()) {
-            "OpenAI API key is not configured. Go to Settings → PR Review Assistant."
+            "OpenAI API key is not configured. Go to Settings → PR Pilot."
         }
         return postChat(
             url      = "https://api.openai.com/v1/chat/completions",
@@ -75,7 +75,7 @@ class OpenAIClient(private val project: Project? = null) {
         val apiKey  = s.getOpenAiCompatKey()
         val baseUrl = s.openAiCompatBaseUrl.trimEnd('/')
         require(baseUrl.isNotBlank()) {
-            "OpenAI-compatible Base URL is not configured. Go to Settings → PR Review Assistant."
+            "OpenAI-compatible Base URL is not configured. Go to Settings → PR Pilot."
         }
         return postChat(
             url      = "$baseUrl/v1/chat/completions",
@@ -90,7 +90,7 @@ class OpenAIClient(private val project: Project? = null) {
         val baseUrl = s.ollamaBaseUrl.trimEnd('/')
         val model   = s.ollamaModel.ifBlank { "llama3" }
         require(baseUrl.isNotBlank()) {
-            "Ollama Base URL is not configured. Go to Settings → PR Review Assistant."
+            "Ollama Base URL is not configured. Go to Settings → PR Pilot."
         }
         return postChat(
             url      = "$baseUrl/v1/chat/completions",

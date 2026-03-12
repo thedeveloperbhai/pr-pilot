@@ -27,7 +27,7 @@ object BitbucketClientRegistry {
 
         pat ?: throw IllegalStateException(
             "No Access Token configured for Bitbucket repo '$key'.\n" +
-            "Go to  Settings → PR Review Assistant → Git Providers  and add a token for this repo.\n" +
+            "Go to  Settings → PR Pilot → Git Providers  and add a token for this repo.\n" +
             "(Workspace: '${workspace.lowercase()}', Repo Slug: '${repoSlug.lowercase()}')"
         )
 

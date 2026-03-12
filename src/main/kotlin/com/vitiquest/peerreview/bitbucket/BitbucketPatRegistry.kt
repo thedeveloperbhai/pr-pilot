@@ -6,7 +6,7 @@ import com.vitiquest.peerreview.settings.PluginSettings
  * Thin facade over [PluginSettings] for per-repo Bitbucket PAT access.
  *
  * PATs are stored in IntelliJ's PasswordSafe (one entry per repo, keyed by
- * "PRReviewAssistant.Bitbucket.workspace/repoSlug") so they survive IDE restarts
+ * "PRPilot.Bitbucket.workspace/repoSlug") so they survive IDE restarts
  * and sandbox reloads reliably.
  *
  * All workspace/repoSlug keys are normalised to lowercase so that a token

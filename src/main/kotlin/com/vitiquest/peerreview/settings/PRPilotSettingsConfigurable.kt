@@ -17,7 +17,7 @@ import javax.swing.border.CompoundBorder
 import javax.swing.table.DefaultTableModel
 
 /**
- * Dedicated full-size settings window for PR Review Assistant.
+ * Dedicated full-size settings window for PR Pilot.
  *
  * Registered as the top-level parent configurable in plugin.xml so it opens in
  * its own IDE settings page instead of being squeezed into the "Tools" panel.
@@ -66,7 +66,7 @@ class PRPilotSettingsConfigurable : Configurable {
     private val codingStdEditor      = buildEditor()
 
     // =========================================================================
-    override fun getDisplayName() = "PR Review Assistant"
+    override fun getDisplayName() = "PR Pilot"
 
     override fun createComponent(): JComponent {
         if (!tabsBuilt) {
