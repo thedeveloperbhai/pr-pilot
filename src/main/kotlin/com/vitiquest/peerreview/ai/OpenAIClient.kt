@@ -40,10 +40,10 @@ class OpenAIClient(private val project: Project? = null) {
     }
 
     private val http = OkHttpClient.Builder()
-        .connectTimeout(30, TimeUnit.SECONDS)
-        .writeTimeout(60, TimeUnit.SECONDS)
-        .readTimeout(300, TimeUnit.SECONDS)   // LLMs can be slow to stream a full response
-        .callTimeout(360, TimeUnit.SECONDS)
+        .connectTimeout(60,  TimeUnit.SECONDS)   // was 30 s — gateway connect can be slow
+        .writeTimeout(120,   TimeUnit.SECONDS)   // was 60 s  — large prompts take time to upload
+        .readTimeout(900,    TimeUnit.SECONDS)   // was 300 s — 15 min for slow/large LLM responses
+        .callTimeout(960,    TimeUnit.SECONDS)   // was 360 s — 16 min overall budget
         .build()
     private val mapper = jacksonObjectMapper()
 
@@ -77,8 +77,15 @@ class OpenAIClient(private val project: Project? = null) {
         require(baseUrl.isNotBlank()) {
             "OpenAI-compatible Base URL is not configured. Go to Settings → PR Pilot."
         }
+
+        val chatUrl = when {
+            baseUrl.endsWith("/v1/chat/completions") -> baseUrl
+            baseUrl.endsWith("/v1")                  -> "$baseUrl/chat/completions"
+            else                                     -> "$baseUrl/v1/chat/completions"
+        }
+
         return postChat(
-            url      = "$baseUrl/v1/chat/completions",
+            url      = chatUrl,
             apiKey   = apiKey,
             model    = s.openAiCompatModel.ifBlank { "gpt-4o" },
             messages = buildMessages(userPrompt, prContext)
@@ -115,6 +122,7 @@ class OpenAIClient(private val project: Project? = null) {
                 "temperature" to 0.3
             )
         )
+
         val requestBuilder = Request.Builder()
             .url(url)
             .header("Content-Type", "application/json")
@@ -127,11 +135,19 @@ class OpenAIClient(private val project: Project? = null) {
         http.newCall(requestBuilder.build()).execute().use { response ->
             val responseBody = response.body?.string() ?: ""
             if (!response.isSuccessful) {
-                throw IOException("AI API error ${response.code}: $responseBody")
+                val hint = when (response.code) {
+                    401  -> " — Check your API key in Settings → PR Pilot → AI Provider."
+                    403  -> " — Token does not have permission to call this endpoint."
+                    404  -> " — Endpoint not found. Verify the Base URL in Settings → PR Pilot → AI Provider."
+                    405  -> " — Method not allowed. The Base URL may already include /v1 or /v1/chat/completions — remove the path suffix and enter only the base URL (e.g. https://api.example.com)."
+                    429  -> " — Rate limited / quota exceeded."
+                    else -> ""
+                }
+                throw IOException("AI API error ${response.code}$hint\n$responseBody")
             }
             val parsed = mapper.readValue(responseBody, ChatCompletionResponse::class.java)
             return parsed.choices.firstOrNull()?.message?.content
-                ?: throw IOException("Empty response from AI")
+                ?: throw IOException("Empty response from AI (choices list was empty).\nFull response:\n$responseBody")
         }
     }
 

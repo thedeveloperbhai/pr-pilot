@@ -82,6 +82,20 @@ class BitbucketClient(internal val pat: String) {
         post("$base/repositories/$workspace/$repoSlug/pullrequests/$prId/merge", body)
     }
 
+    /**
+     * Posts a text comment on a pull request.
+     * Bitbucket API: POST /2.0/repositories/{workspace}/{repoSlug}/pullrequests/{prId}/comments
+     *
+     * Uses Jackson to serialise the body so newlines, backticks, quotes and other
+     * special characters in the AI summary are always properly escaped.
+     */
+    fun postComment(workspace: String, repoSlug: String, prId: Int, commentBody: String) {
+        val jsonBody = mapper.writeValueAsString(
+            mapOf("content" to mapOf("raw" to commentBody))
+        )
+        post("$base/repositories/$workspace/$repoSlug/pullrequests/$prId/comments", jsonBody)
+    }
+
     // -------------------------------------------------------------------------
     // HTTP helpers
     // -------------------------------------------------------------------------

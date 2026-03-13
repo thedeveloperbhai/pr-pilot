@@ -66,6 +66,9 @@ class PRToolWindowPanel(private val project: Project) : JPanel(BorderLayout()), 
     // prId → number of changed files (populated when diff is fetched)
     private val prFileCount = mutableMapOf<Int, Int>()
 
+    // prId → cached AI summary markdown (avoids repeat API calls for the same PR)
+    private val aiSummaryCache = mutableMapOf<Int, String>()
+
     // filePath → open diff Window, so clicking the same file twice focuses instead of duplicating
     private val openDiffWindows = mutableMapOf<String, Window>()
 
@@ -666,7 +669,26 @@ class PRToolWindowPanel(private val project: Project) : JPanel(BorderLayout()), 
     private fun onAiSummary() {
         val pr   = selectedPr() ?: return
         val info = repoInfo ?: return
-        setStatus("Building AI summary for PR #${pr.id}…")
+
+        // ── Serve from cache if available ─────────────────────────────────────
+        val cached = aiSummaryCache[pr.id]
+        if (cached != null) {
+            setStatus("AI summary loaded from cache for PR #${pr.id}.")
+            showSummaryDialog(pr, cached, info)
+            return
+        }
+
+        generateAiSummary(pr, info, forceRegenerate = false)
+    }
+
+    /** Clears the cache for [pr] and re-runs the full AI pipeline. */
+    private fun regenerateAiSummary(pr: PullRequest, info: RepoInfo) {
+        aiSummaryCache.remove(pr.id)
+        generateAiSummary(pr, info, forceRegenerate = true)
+    }
+
+    private fun generateAiSummary(pr: PullRequest, info: RepoInfo, forceRegenerate: Boolean) {
+        setStatus("${if (forceRegenerate) "Regenerating" else "Building"} AI summary for PR #${pr.id}…")
         runInBackground {
             try {
                 // 1. Fetch diff stat (list of changed files) and full unified diff
@@ -726,7 +748,11 @@ class PRToolWindowPanel(private val project: Project) : JPanel(BorderLayout()), 
                     fileCount         = analyses.size
                 )
                 val summary = aiClient.generateSummary(buildPrompt(pr, analyses, referencedAnalyses), prContext)
-                invokeLater { showSummaryDialog(pr, summary); setStatus("AI summary generated.") }
+                invokeLater {
+                    aiSummaryCache[pr.id] = summary          // store in cache
+                    showSummaryDialog(pr, summary, info)
+                    setStatus("AI summary generated.")
+                }
             } catch (e: Exception) {
                 invokeLater {
                     setStatus("AI error: ${e.message}")
@@ -825,24 +851,21 @@ class PRToolWindowPanel(private val project: Project) : JPanel(BorderLayout()), 
         }.trimIndent()
     }
 
-    private fun showSummaryDialog(pr: PullRequest, summary: String) {
+    private fun showSummaryDialog(pr: PullRequest, summary: String, info: RepoInfo) {
         val html = markdownToHtml(summary)
 
-        // Resolve theme colours
-        val uiFont    = com.intellij.util.ui.UIUtil.getLabelFont()
-        val bgColor   = com.intellij.util.ui.UIUtil.getPanelBackground()
-        val fgColor   = com.intellij.util.ui.UIUtil.getLabelForeground()
-        val isDark    = !JBColor.isBright()
-        val codeBg    = if (isDark) "#2B2B2B" else "#F5F5F5"
-        val fg        = "#${fgColor.toHex()}"
-        val bg        = "#${bgColor.toHex()}"
-        val fontPt    = uiFont.size
-        val fontFam   = uiFont.family
+        // ── Theme colours ─────────────────────────────────────────────────────
+        val uiFont  = com.intellij.util.ui.UIUtil.getLabelFont()
+        val bgColor = com.intellij.util.ui.UIUtil.getPanelBackground()
+        val fgColor = com.intellij.util.ui.UIUtil.getLabelForeground()
+        val isDark  = !JBColor.isBright()
+        val codeBg  = if (isDark) "#2B2B2B" else "#F5F5F5"
+        val fg      = "#${fgColor.toHex()}"
+        val bg      = "#${bgColor.toHex()}"
+        val fontPt  = uiFont.size
+        val fontFam = uiFont.family
 
         // Build a stylesheet using ONLY CSS1/CSS2 properties Swing HTMLEditorKit understands.
-        // NEVER use: border-color, border-spacing, border-radius, white-space, word-wrap,
-        // nth-child, or any shorthand with more than one value — they cause NullPointerExceptions
-        // inside Swing's CssValue.parseCssValue().
         val css = buildString {
             append("body { font-family: $fontFam; font-size: ${fontPt}pt; color: $fg; background-color: $bg; }")
             append("h1 { font-size: ${(fontPt * 1.8).toInt()}pt; color: $fg; }")
@@ -851,7 +874,6 @@ class PRToolWindowPanel(private val project: Project) : JPanel(BorderLayout()), 
             append("p  { margin-top: 4px; margin-bottom: 4px; }")
             append("code { font-family: monospace; font-size: ${fontPt - 1}pt; background-color: $codeBg; color: $fg; }")
             append("pre  { font-family: monospace; font-size: ${fontPt - 1}pt; background-color: $codeBg; color: $fg; margin-top: 6px; margin-bottom: 6px; }")
-            // border-spacing and border-color are CSS2/3 and not handled by Swing — omit them
             append("table { }")
             append("th { font-weight: bold; background-color: $codeBg; color: $fg; padding-top: 4px; padding-bottom: 4px; padding-left: 8px; padding-right: 8px; }")
             append("td { color: $fg; padding-top: 3px; padding-bottom: 3px; padding-left: 8px; padding-right: 8px; }")
@@ -863,11 +885,8 @@ class PRToolWindowPanel(private val project: Project) : JPanel(BorderLayout()), 
             append("blockquote { color: #888888; margin-left: 16px; }")
         }
 
-        // Inject CSS via StyleSheet so the parser never sees CSS3 tokens
         val kit = javax.swing.text.html.HTMLEditorKit()
-        val styleSheet = kit.styleSheet
-        styleSheet.addRule(css)
-
+        kit.styleSheet.addRule(css)
         val doc = kit.createDefaultDocument() as javax.swing.text.html.HTMLDocument
 
         val textPane = JTextPane().apply {
@@ -876,10 +895,7 @@ class PRToolWindowPanel(private val project: Project) : JPanel(BorderLayout()), 
             isEditable = false
             background = bgColor
         }
-
-        // Set content AFTER kit+doc are wired — avoids a second CSS parse of the <style> block
-        val bareHtml = "<html><body>$html</body></html>"
-        textPane.text = bareHtml
+        textPane.text = "<html><body>$html</body></html>"
         textPane.caretPosition = 0
 
         val scroll = JBScrollPane(textPane).apply {
@@ -888,36 +904,142 @@ class PRToolWindowPanel(private val project: Project) : JPanel(BorderLayout()), 
             horizontalScrollBarPolicy = JScrollPane.HORIZONTAL_SCROLLBAR_NEVER
         }
 
-        val copyMdBtn = JButton("Copy Markdown").apply {
-            addActionListener {
-                copyToClipboard(summary)
-                text = "✓ Copied!"
-                Timer(1500) { text = "Copy Markdown" }.also { t -> t.isRepeats = false; t.start() }
+        // ── Bottom action bar ─────────────────────────────────────────────────
+        val isGH         = info.provider == com.vitiquest.peerreview.settings.GitProvider.GITHUB
+        val isOpen       = pr.state.uppercase() == "OPEN"
+        val declineLabel = if (isGH) "Close PR" else "Decline PR"
+
+        // Left side: Regenerate + Copy
+        val regenBtn = JButton(AllIcons.Actions.Refresh).apply {
+            toolTipText = "Regenerate AI summary (clears cache)"
+            isBorderPainted     = false
+            isContentAreaFilled = false
+            preferredSize       = Dimension(28, 28)
+        }
+        val copyBtn = JButton("Copy Markdown").apply {
+            font = Font(font.family, Font.PLAIN, 11)
+        }
+
+        // Right side: action buttons (only shown when PR is open)
+        val approveBtn = JButton("✅  Approve").apply {
+            font        = Font(font.family, Font.BOLD, 12)
+            foreground  = JBColor(Color(0x166534), Color(0x3FB950))
+            isVisible   = isOpen
+            toolTipText = "Post AI summary as comment, then approve this PR"
+        }
+        val mergeBtn = JButton("🔀  Merge").apply {
+            font        = Font(font.family, Font.BOLD, 12)
+            foreground  = JBColor(Color(0x0550AE), Color(0x58A6FF))
+            isVisible   = isOpen
+            toolTipText = "Post AI summary as comment, then merge this PR"
+        }
+        val declineBtn = JButton("❌  $declineLabel").apply {
+            font        = Font(font.family, Font.BOLD, 12)
+            foreground  = JBColor(Color(0x9F1239), Color(0xF85149))
+            isVisible   = isOpen
+            toolTipText = "Post AI summary as comment, then ${declineLabel.lowercase()} this PR"
+        }
+        val closeDialogBtn = JButton("Close").apply {
+            font = Font(font.family, Font.PLAIN, 12)
+        }
+
+        val leftBar = JPanel(FlowLayout(FlowLayout.LEFT, 4, 4)).apply {
+            isOpaque = false
+            add(regenBtn)
+            add(copyBtn)
+        }
+        val rightBar = JPanel(FlowLayout(FlowLayout.RIGHT, 6, 4)).apply {
+            isOpaque = false
+            if (isOpen) {
+                add(approveBtn)
+                add(mergeBtn)
+                add(declineBtn)
+                add(JSeparator(JSeparator.VERTICAL).apply { preferredSize = Dimension(1, 24) })
             }
+            add(closeDialogBtn)
         }
 
-        val south = JPanel(FlowLayout(FlowLayout.RIGHT, 8, 6)).apply {
-            add(JBLabel("Rendered markdown preview").apply {
-                foreground = JBColor.GRAY
-                font = Font(font.family, Font.ITALIC, 11)
-            })
-            add(copyMdBtn)
+        val southBar = JPanel(BorderLayout()).apply {
+            border   = javax.swing.border.MatteBorder(1, 0, 0, 0, JBColor.border())
+            isOpaque = true
+            background = bgColor
+            add(leftBar,  BorderLayout.WEST)
+            add(rightBar, BorderLayout.EAST)
         }
 
+        // ── Dialog ────────────────────────────────────────────────────────────
         val dialog = JDialog(
             SwingUtilities.getWindowAncestor(this),
             "AI Summary — PR #${pr.id}: ${pr.title}",
             java.awt.Dialog.ModalityType.APPLICATION_MODAL
         ).apply {
             contentPane = JPanel(BorderLayout()).apply {
-                add(scroll, BorderLayout.CENTER)
-                add(south,  BorderLayout.SOUTH)
+                add(scroll,   BorderLayout.CENTER)
+                add(southBar, BorderLayout.SOUTH)
             }
             pack()
             setLocationRelativeTo(this@PRToolWindowPanel)
             minimumSize = Dimension(700, 500)
             isResizable  = true
         }
+
+        // ── Wire button actions ───────────────────────────────────────────────
+
+        copyBtn.addActionListener {
+            copyToClipboard(summary)
+            copyBtn.text = "✓ Copied!"
+            Timer(1500) { copyBtn.text = "Copy Markdown" }.also { t -> t.isRepeats = false; t.start() }
+        }
+
+        regenBtn.addActionListener {
+            dialog.dispose()
+            regenerateAiSummary(pr, info)
+        }
+
+        closeDialogBtn.addActionListener { dialog.dispose() }
+
+        /**
+         * Asks whether to post the summary as a comment, then executes [action].
+         * Closes the dialog after the action completes.
+         */
+        fun executeWithOptionalComment(actionLabel: String, action: () -> Unit) {
+            val choice = JOptionPane.showOptionDialog(
+                dialog,
+                "Post AI summary as a comment on PR #${pr.id} before ${actionLabel.lowercase()}ing?",
+                "Confirm $actionLabel",
+                JOptionPane.YES_NO_CANCEL_OPTION,
+                JOptionPane.QUESTION_MESSAGE,
+                null,
+                arrayOf("Post & $actionLabel", actionLabel + " only", "Cancel"),
+                "Post & $actionLabel"
+            )
+            if (choice == 2 || choice == JOptionPane.CLOSED_OPTION) return  // cancelled
+
+            dialog.dispose()
+            setStatus("${actionLabel}ing PR #${pr.id}…")
+            runInBackground {
+                try {
+                    if (choice == 0) {   // "Post & <action>"
+                        service.postComment(info.owner, info.repoSlug, pr.id, summary)
+                    }
+                    action()
+                    invokeLater {
+                        notify("PR #${pr.id} ${actionLabel.lowercase()}d.", NotificationType.INFORMATION)
+                        loadPullRequests()
+                    }
+                } catch (e: Exception) {
+                    invokeLater {
+                        setStatus("$actionLabel failed.")
+                        Messages.showErrorDialog(project, e.message ?: "Unknown error", "$actionLabel PR #${pr.id} Failed")
+                    }
+                }
+            }
+        }
+
+        approveBtn.addActionListener  { executeWithOptionalComment("Approve")  { service.approvePullRequest(info.owner, info.repoSlug, pr.id) } }
+        mergeBtn.addActionListener    { executeWithOptionalComment("Merge")    { service.mergePullRequest(info.owner, info.repoSlug, pr.id) } }
+        declineBtn.addActionListener  { executeWithOptionalComment(if (isGH) "Close" else "Decline") { service.declinePullRequest(info.owner, info.repoSlug, pr.id) } }
+
         dialog.isVisible = true
     }
 

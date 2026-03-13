@@ -62,4 +62,11 @@ class PullRequestService {
     fun mergePullRequest(owner: String, repo: String, prId: Int) =
         if (isGitHub) gitHubClient().mergePullRequest(owner, repo, prId)
         else          bitbucketClient(owner, repo).mergePullRequest(owner, repo, prId)
+
+    /**
+     * Posts a plain-text / markdown comment on the pull request.
+     */
+    fun postComment(owner: String, repo: String, prId: Int, body: String) =
+        if (isGitHub) gitHubClient().postComment(owner, repo, prId, body)
+        else          bitbucketClient(owner, repo).postComment(owner, repo, prId, body)
 }

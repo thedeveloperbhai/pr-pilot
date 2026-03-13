@@ -115,6 +115,19 @@ class GitHubClient(private val pat: String) {
         put(url, body)
     }
 
+    /**
+     * Posts a comment on a pull request.
+     * GitHub Issues comments endpoint works for both issues and PRs.
+     * POST /repos/{owner}/{repo}/issues/{prNumber}/comments
+     *
+     * Uses Jackson to serialise the body so newlines, backticks, quotes and other
+     * special characters in the AI summary are always properly escaped.
+     */
+    fun postComment(owner: String, repo: String, prNumber: Int, commentBody: String) {
+        val jsonBody = mapper.writeValueAsString(mapOf("body" to commentBody))
+        post("$base/repos/$owner/$repo/issues/$prNumber/comments", jsonBody)
+    }
+
     // ── HTTP helpers ──────────────────────────────────────────────────────────
 
     private fun get(url: String): String {
