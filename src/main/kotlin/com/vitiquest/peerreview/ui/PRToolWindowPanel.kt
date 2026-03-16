@@ -1,7 +1,5 @@
 package com.vitiquest.peerreview.ui
 
-import com.fasterxml.jackson.module.kotlin.jacksonObjectMapper
-import com.fasterxml.jackson.module.kotlin.readValue
 import com.intellij.diff.DiffContentFactory
 import com.intellij.diff.DiffDialogHints
 import com.intellij.diff.DiffManager
@@ -10,12 +8,10 @@ import com.intellij.icons.AllIcons
 import com.intellij.notification.NotificationGroupManager
 import com.intellij.notification.NotificationType
 import com.intellij.openapi.application.ApplicationManager
-import com.intellij.openapi.application.ReadAction
 import com.intellij.openapi.fileTypes.FileTypeManager
 import com.intellij.openapi.project.Project
 import com.intellij.openapi.ui.ComboBox
 import com.intellij.openapi.ui.Messages
-import com.intellij.openapi.vfs.LocalFileSystem
 import com.intellij.ui.JBColor
 import com.intellij.ui.components.JBLabel
 import com.intellij.ui.components.JBList
@@ -24,9 +20,7 @@ import com.intellij.ui.components.JBTextField
 import com.intellij.util.ui.AsyncProcessIcon
 import com.intellij.util.ui.JBUI
 import com.vitiquest.peerreview.ai.AiReviewResult
-import com.vitiquest.peerreview.ai.InlineComment
 import com.vitiquest.peerreview.ai.OpenAIClient
-import com.vitiquest.peerreview.analysis.CodeAnalyzer
 import com.vitiquest.peerreview.bitbucket.PullRequest
 import com.vitiquest.peerreview.bitbucket.PullRequestService
 import com.vitiquest.peerreview.jira.JiraIntegrationService
@@ -36,23 +30,8 @@ import com.vitiquest.peerreview.settings.PluginSettings
 import com.vitiquest.peerreview.utils.GitUtils
 import com.vitiquest.peerreview.utils.RepoInfo
 import java.awt.*
-import java.io.File
-import java.time.format.DateTimeFormatter
 import javax.swing.*
 import javax.swing.border.MatteBorder
-import javax.swing.Timer
-
-// ---------------------------------------------------------------------------
-// Data class holding a parsed per-file diff entry
-// ---------------------------------------------------------------------------
-data class FileDiffEntry(
-    val displayLabel: String,   // e.g. "src/Foo.kt"
-    val statusTag: String,      // "ADDED" | "DELETED" | "MODIFIED" | "RENAMED"
-    val oldPath: String,
-    val newPath: String,
-    val oldText: String,        // reconstructed old file content
-    val newText: String         // reconstructed new file content
-)
 
 // ---------------------------------------------------------------------------
 // Main panel – uses CardLayout to switch between PR list and File list views
@@ -102,6 +81,24 @@ class PRToolWindowPanel(private val project: Project) : JPanel(BorderLayout()), 
     private val cardPanel    = JPanel(cardLayout)
     private val CARD_PR_LIST = "PR_LIST"
     private val CARD_FILES   = "FILE_LIST"
+
+    // ── Extracted helpers ─────────────────────────────────────────────────────
+    private val aiReviewBuilder     = AiReviewBuilder(project, service, aiClient)
+    private val aiSummaryDialogHelper by lazy {
+        AiSummaryDialog(
+            parent             = this,
+            project            = project,
+            service            = service,
+            jiraService        = jiraService,
+            onRegenerate       = ::regenerateAiSummary,
+            onSetStatus        = ::setStatus,
+            onSetBusy          = ::setBusy,
+            onNotify           = ::notify,
+            onLoadPullRequests = ::loadPullRequests,
+            runInBackground    = ::runInBackground,
+            invokeLater        = ::invokeLater
+        )
+    }
 
     init {
         buildUi()
@@ -549,7 +546,7 @@ class PRToolWindowPanel(private val project: Project) : JPanel(BorderLayout()), 
         runInBackground {
             try {
                 val rawDiff = service.getPullRequestDiff(info.owner, info.repoSlug, pr.id)
-                val entries = parseDiffToEntries(rawDiff)
+                val entries = DiffParser.parseToEntries(rawDiff)
                 invokeLater {
                     setBusy(false)
                     if (entries.isEmpty()) {
@@ -642,78 +639,6 @@ class PRToolWindowPanel(private val project: Project) : JPanel(BorderLayout()), 
     }
 
     // =========================================================================
-    // Unified diff parser → List<FileDiffEntry>
-    // =========================================================================
-
-    private fun parseDiffToEntries(rawDiff: String): List<FileDiffEntry> {
-        val entries = mutableListOf<FileDiffEntry>()
-        val filePatches = rawDiff.split(Regex("(?=diff --git )")).filter { it.isNotBlank() }
-
-        for (patch in filePatches) {
-            val lines = patch.lines()
-
-            // Strip the leading a/ or b/ prefix; null-safe with empty fallback
-            val oldPath = lines.firstOrNull { it.startsWith("--- ") }
-                ?.removePrefix("--- ")?.removePrefix("a/")?.trim()
-                ?.takeIf { it.isNotBlank() } ?: ""
-            val newPath = lines.firstOrNull { it.startsWith("+++ ") }
-                ?.removePrefix("+++ ")?.removePrefix("b/")?.trim()
-                ?.takeIf { it.isNotBlank() } ?: ""
-
-            // /dev/null signals an added or deleted file (with or without leading slash)
-            val isAdded   = oldPath.endsWith("/dev/null") || oldPath == "/dev/null" || oldPath == "dev/null"
-            val isDeleted = newPath.endsWith("/dev/null") || newPath == "/dev/null" || newPath == "dev/null"
-            val isRenamed = !isAdded && !isDeleted && oldPath.isNotBlank() && newPath.isNotBlank() && oldPath != newPath
-
-            val oldLines = mutableListOf<String>()
-            val newLines = mutableListOf<String>()
-
-            for (line in lines) {
-                when {
-                    line.startsWith("--- ")     ||
-                    line.startsWith("+++ ")     ||
-                    line.startsWith("diff ")    ||
-                    line.startsWith("index ")   ||
-                    line.startsWith("new file") ||
-                    line.startsWith("deleted file") ||
-                    line.startsWith("@@")        -> Unit
-                    line.startsWith("-")         -> oldLines.add(line.drop(1))
-                    line.startsWith("+")         -> newLines.add(line.drop(1))
-                    line.startsWith("\\")        -> Unit
-                    else -> {
-                        val ctx = if (line.startsWith(" ")) line.drop(1) else line
-                        oldLines.add(ctx); newLines.add(ctx)
-                    }
-                }
-            }
-
-            val displayPath = when {
-                isAdded                    -> newPath.ifBlank { oldPath }
-                isDeleted                  -> oldPath.ifBlank { newPath }
-                isRenamed                  -> "$oldPath → $newPath"
-                newPath.isNotBlank()       -> newPath
-                else                       -> oldPath.ifBlank { "(unknown)" }
-            }
-            val statusTag = when {
-                isAdded   -> "ADDED"
-                isDeleted -> "DELETED"
-                isRenamed -> "RENAMED"
-                else      -> "MODIFIED"
-            }
-
-            entries.add(FileDiffEntry(
-                displayLabel = displayPath,
-                statusTag    = statusTag,
-                oldPath      = oldPath,
-                newPath      = newPath,
-                oldText      = if (isAdded) "" else oldLines.joinToString("\n"),
-                newText      = if (isDeleted) "" else newLines.joinToString("\n")
-            ))
-        }
-        return entries
-    }
-
-    // =========================================================================
     // AI Summary
     // =========================================================================
 
@@ -743,8 +668,10 @@ class PRToolWindowPanel(private val project: Project) : JPanel(BorderLayout()), 
         setBusy(true)
         runInBackground {
             try {
-                val rawText = buildAiSummaryText(pr, info)
-                val result  = parseAiResponse(rawText)
+                val rawText = aiReviewBuilder.buildSummaryText(pr, info) { msg ->
+                    invokeLater { setStatus(msg) }
+                }
+                val result  = aiReviewBuilder.parseResponse(rawText)
                 invokeLater {
                     setBusy(false)
                     aiSummaryCache[pr.id] = result
@@ -761,800 +688,33 @@ class PRToolWindowPanel(private val project: Project) : JPanel(BorderLayout()), 
         }
     }
 
-    /**
-     * Parses the raw AI response text into an [AiReviewResult].
-     *
-     * The AI is instructed to append a JSON block delimited by
-     * <!-- INLINE_COMMENTS_START --> and <!-- INLINE_COMMENTS_END --> tags.
-     * Everything before the first delimiter is the Markdown summary.
-     */
-    private fun parseAiResponse(rawText: String): AiReviewResult {
-        val startTag = "<!-- INLINE_COMMENTS_START -->"
-        val endTag   = "<!-- INLINE_COMMENTS_END -->"
-
-        val startIdx = rawText.indexOf(startTag)
-        val endIdx   = rawText.indexOf(endTag)
-
-        if (startIdx == -1 || endIdx == -1 || endIdx <= startIdx) {
-            return AiReviewResult.ofSummaryOnly(rawText.trim())
-        }
-
-        val summary  = rawText.substring(0, startIdx).trim()
-        // Strip any accidental markdown code fence the model may have added
-        val rawJson  = rawText.substring(startIdx + startTag.length, endIdx).trim()
-            .removePrefix("```json").removePrefix("```").removeSuffix("```").trim()
-
-        val inlineComments = try {
-            val mapper = jacksonObjectMapper()
-            mapper.readValue<List<InlineComment>>(rawJson)
-        } catch (e: Exception) {
-            emptyList()
-        }
-
-        return AiReviewResult(summary, inlineComments)
-    }
-
-    private fun buildAiSummaryText(pr: PullRequest, info: RepoInfo): String {
-        val diffStat     = service.getDiffStat(info.owner, info.repoSlug, pr.id)
-        val rawDiff      = service.getPullRequestDiff(info.owner, info.repoSlug, pr.id)
-        val changedFiles = diffStat.take(20).mapNotNull { it.newFile?.path ?: it.oldFile?.path }
-        val basePath     = project.basePath ?: ""
-
-        val patchMap = buildPatchMap(rawDiff)
-        val analyses = changedFiles.map { path ->
-            val content = ReadAction.compute<String, Exception> {
-                val vf = LocalFileSystem.getInstance().findFileByIoFile(File(basePath, path))
-                vf?.let { runCatching { String(it.contentsToByteArray()) }.getOrElse { "" } } ?: ""
-            }
-            val patch = patchMap[path] ?: patchMap.entries
-                .firstOrNull { it.key.endsWith(path) || path.endsWith(it.key) }?.value ?: ""
-            CodeAnalyzer.analyze(path, content, patch)
-        }
-
-        val alreadyIncluded = changedFiles.toMutableSet()
-        val referencedAnalyses = mutableListOf<CodeAnalyzer.FileAnalysis>()
-
-        analyses.forEach { analysis ->
-            val localPaths = CodeAnalyzer.resolveLocalImports(
-                imports = analysis.imports,
-                language = analysis.language,
-                projectRoot = basePath,
-                alreadyIncluded = alreadyIncluded
-            )
-            localPaths.forEach { refPath ->
-                alreadyIncluded.add(refPath)
-                val refContent = ReadAction.compute<String, Exception> {
-                    val vf = LocalFileSystem.getInstance().findFileByIoFile(File(basePath, refPath))
-                    vf?.let { runCatching { String(it.contentsToByteArray()) }.getOrElse { "" } } ?: ""
-                }
-                if (refContent.isNotBlank()) {
-                    referencedAnalyses.add(
-                        CodeAnalyzer.analyze(refPath, refContent, "", isReferenced = true)
-                    )
-                }
-            }
-        }
-
-        invokeLater {
-            setStatus("Generating AI review for PR #${pr.id} (${analyses.size} changed, ${referencedAnalyses.size} referenced)…")
-        }
-        val prContext = OpenAIClient.PrContext(
-            id                = pr.id,
-            title             = pr.title,
-            author            = pr.author.displayName,
-            sourceBranch      = pr.source.branch.name,
-            destinationBranch = pr.destination.branch.name,
-            fileCount         = analyses.size
-        )
-        return aiClient.generateSummary(buildPrompt(pr, analyses, referencedAnalyses), prContext)
-    }
-
     private fun getOrBuildAiSummary(pr: PullRequest, info: RepoInfo): String {
         return aiSummaryCache[pr.id]?.summary
-            ?: parseAiResponse(buildAiSummaryText(pr, info))
+            ?: aiReviewBuilder.parseResponse(aiReviewBuilder.buildSummaryText(pr, info))
                 .also { aiSummaryCache[pr.id] = it }
                 .summary
     }
 
-    /**
-     * Splits a full unified diff string into a map of  filePath → patchText.
-     * Keys use the new-file path (b/ prefix stripped).
-     */
-    private fun buildPatchMap(rawDiff: String): Map<String, String> {
-        val map      = mutableMapOf<String, String>()
-        val sections = rawDiff.split(Regex("(?=diff --git )")).filter { it.isNotBlank() }
-        for (section in sections) {
-            val newPathLine = section.lines().firstOrNull { it.startsWith("+++ ") } ?: continue
-            val path = newPathLine.removePrefix("+++ ").removePrefix("b/").trim()
-            if (path.isNotBlank() && path != "/dev/null") map[path] = section
-        }
-        return map
-    }
+    private fun showSummaryDialog(pr: PullRequest, result: AiReviewResult, info: RepoInfo) =
+        aiSummaryDialogHelper.show(pr, result, info)
 
-    /**
-     * Builds the USER message sent to the AI — contains only the structured code
-     * data (file analyses + truncated source).
-     *
-     * Role, tone, output format    → system_prompt.md   (system message 1)
-     * Review rules + standards     → review_rules.md + coding_standards.md (system message 2)
-     * PR id / title / author       → PrContext  (system message 3)
-     * Diff data                    → THIS method (user message)
-     *
-     * @param analyses           directly changed files (from the PR diff)
-     * @param referencedAnalyses files imported by changed files — not modified but provide context
-     */
-    private fun buildPrompt(
-        pr: PullRequest,
-        analyses: List<CodeAnalyzer.FileAnalysis>,
-        referencedAnalyses: List<CodeAnalyzer.FileAnalysis> = emptyList()
-    ): String {
-        return buildString {
-            // ── Directly changed files ────────────────────────────────────────
-            appendLine("## Directly Changed Files (${analyses.size})")
-            appendLine()
-            appendLine("These files were modified in PR #${pr.id}. Review them thoroughly.")
-            appendLine()
 
-            analyses.forEach { analysis ->
-                appendLine(CodeAnalyzer.formatForPrompt(analysis))
 
-                // Truncated file content (3 000 chars per file to stay within token budget)
-                val fileContent = ReadAction.compute<String?, Exception> {
-                    val f = File(project.basePath ?: "", analysis.path)
-                    LocalFileSystem.getInstance().findFileByIoFile(f)?.let {
-                        runCatching { String(it.contentsToByteArray()).take(3000) }.getOrNull()
-                    }
-                }
-                if (!fileContent.isNullOrBlank()) {
-                    appendLine("```${analysis.language}")
-                    appendLine(fileContent)
-                    appendLine("```")
-                }
-                appendLine("---")
-            }
 
-            // ── Referenced files (resolved from imports) ──────────────────────
-            if (referencedAnalyses.isNotEmpty()) {
-                appendLine()
-                appendLine("## Referenced Files (${referencedAnalyses.size})")
-                appendLine()
-                appendLine("These files are **imported by** the changed files above.")
-                appendLine("They were NOT directly modified but are part of the blast radius.")
-                appendLine("Use them to understand the full context — interfaces, base classes,")
-                appendLine("shared utilities, or data models that the changed code depends on.")
-                appendLine()
 
-                referencedAnalyses.forEach { analysis ->
-                    appendLine(CodeAnalyzer.formatForPrompt(analysis))
 
-                    // Smaller snippet for referenced files — 1 500 chars is enough for structure
-                    val refContent = ReadAction.compute<String?, Exception> {
-                        val f = File(project.basePath ?: "", analysis.path)
-                        LocalFileSystem.getInstance().findFileByIoFile(f)?.let {
-                            runCatching { String(it.contentsToByteArray()).take(1500) }.getOrNull()
-                        }
-                    }
-                    if (!refContent.isNullOrBlank()) {
-                        appendLine("```${analysis.language}")
-                        appendLine(refContent)
-                        appendLine("```")
-                    }
-                    appendLine("---")
-                }
-            }
-        }.trimIndent()
-    }
 
-    private fun showSummaryDialog(pr: PullRequest, result: AiReviewResult, info: RepoInfo) {
-        val summary  = result.summary
-        val comments = result.inlineComments
 
-        // ── Theme colours ─────────────────────────────────────────────────────
-        val uiFont   = com.intellij.util.ui.UIUtil.getLabelFont()
-        val bgColor  = com.intellij.util.ui.UIUtil.getPanelBackground()
-        val fgColor  = com.intellij.util.ui.UIUtil.getLabelForeground()
-        val isDark   = !JBColor.isBright()
 
-        // Slightly elevated card bg (lighter in light theme, slightly brighter in dark)
-        val cardBg   = if (isDark) JBColor(Color(0x3C3F41), Color(0x3C3F41))
-                       else        JBColor(Color(0xFFFFFF), Color(0xFFFFFF))
 
-        val codeBg   = if (isDark) "#2B2B2B" else "#F5F5F5"
-        val fg       = "#${fgColor.toHex()}"
-        val bg       = "#${bgColor.toHex()}"
-        val fontPt   = uiFont.size
-        val fontFam  = uiFont.family
 
-        // ── CSS for HTMLEditorKit ─────────────────────────────────────────────
-        val css = buildString {
-            append("body { font-family: $fontFam; font-size: ${fontPt}pt; color: $fg; background-color: $bg; margin: 16px 20px; }")
-            append("h1 { font-size: ${(fontPt * 1.7).toInt()}pt; color: $fg; margin-top: 0px; margin-bottom: 8px; }")
-            append("h2 { font-size: ${(fontPt * 1.35).toInt()}pt; color: $fg; margin-top: 18px; margin-bottom: 4px; border-bottom: 1px solid #888; padding-bottom: 2px; }")
-            append("h3 { font-size: ${(fontPt * 1.1).toInt()}pt; color: $fg; margin-top: 12px; margin-bottom: 2px; }")
-            append("p  { margin-top: 5px; margin-bottom: 5px; line-height: 1.5; }")
-            append("code { font-family: monospace; font-size: ${fontPt - 1}pt; background-color: $codeBg; color: $fg; padding-left: 3px; padding-right: 3px; }")
-            append("pre  { font-family: monospace; font-size: ${fontPt - 1}pt; background-color: $codeBg; color: $fg; padding: 10px; margin-top: 8px; margin-bottom: 8px; }")
-            append("table { border-collapse: collapse; width: 100%; margin-top: 10px; margin-bottom: 10px; }")
-            append("th { font-weight: bold; background-color: $codeBg; color: $fg; padding: 6px 10px; border: 1px solid #555; }")
-            append("td { color: $fg; padding: 5px 10px; border: 1px solid #555; }")
-            append("ul { margin-left: 22px; margin-top: 4px; margin-bottom: 4px; }")
-            append("ol { margin-left: 22px; margin-top: 4px; margin-bottom: 4px; }")
-            append("li { margin-bottom: 3px; line-height: 1.5; }")
-            append("strong { font-weight: bold; }")
-            append("em { font-style: italic; }")
-            append("blockquote { color: #888888; margin-left: 16px; border-left: 3px solid #888; padding-left: 8px; }")
-            append("hr { border: none; border-top: 1px solid #555; margin-top: 12px; margin-bottom: 12px; }")
-        }
 
-        // ── Tab 1: Summary ────────────────────────────────────────────────────
-        val kit = javax.swing.text.html.HTMLEditorKit()
-        kit.styleSheet.addRule(css)
-        val doc = kit.createDefaultDocument() as javax.swing.text.html.HTMLDocument
 
-        val textPane = JTextPane().apply {
-            editorKit  = kit
-            document   = doc
-            isEditable = false
-            background = bgColor
-            border     = JBUI.Borders.empty()
-        }
-        textPane.text = "<html><body>${markdownToHtml(summary)}</body></html>"
-        textPane.caretPosition = 0
 
-        val summaryScroll = JBScrollPane(textPane).apply {
-            verticalScrollBarPolicy   = JScrollPane.VERTICAL_SCROLLBAR_AS_NEEDED
-            horizontalScrollBarPolicy = JScrollPane.HORIZONTAL_SCROLLBAR_NEVER
-            border = null
-        }
 
-        // ── Tab 2: Inline Comments ─────────────────────────────────────────────
-        val commentCheckboxes = mutableListOf<JCheckBox>()
-        val commentTextAreas  = mutableListOf<JTextArea>()
 
-        // Wrappers panel scrolls vertically; each card is a styled rounded box
-        val inlinePanel = JPanel().apply {
-            layout     = BoxLayout(this, BoxLayout.Y_AXIS)
-            background = bgColor
-            border     = JBUI.Borders.empty(12, 16, 12, 16)
-        }
 
-        if (comments.isEmpty()) {
-            val emptyBox = JPanel(BorderLayout()).apply {
-                isOpaque = false
-                border   = JBUI.Borders.empty(40, 0)
-            }
-            val emptyLbl = JBLabel("✅  No inline comments — the AI found no specific line-level issues.").apply {
-                foreground          = JBColor.GRAY
-                font                = Font(font.family, Font.ITALIC, fontPt)
-                horizontalAlignment = SwingConstants.CENTER
-            }
-            emptyBox.add(emptyLbl, BorderLayout.CENTER)
-            inlinePanel.add(emptyBox)
-        } else {
-            for ((idx, ic) in comments.withIndex()) {
-                val sev          = ic.severity.lowercase()
-                val sevLabelStr  = when (sev) { "critical" -> "🔴  CRITICAL"; "warning" -> "🟡  WARNING"; else -> "🟢  SUGGESTION" }
-                val sevColorVal  = when (sev) { "critical" -> JBColor(Color(0xC0392B), Color(0xFF6B6B)); "warning" -> JBColor(Color(0xB45309), Color(0xF5C518)); else -> JBColor(Color(0x166534), Color(0x4CAF50)) }
-                val sevBgVal     = when (sev) { "critical" -> JBColor(Color(0xFFF0EE), Color(0x3D1A1A)); "warning" -> JBColor(Color(0xFFFBEB), Color(0x2E2000)); else -> JBColor(Color(0xF0FFF4), Color(0x0D2E18)) }
-                val accentVal    = when (sev) { "critical" -> if (isDark) Color(0xFF6B6B) else Color(0xC0392B); "warning" -> if (isDark) Color(0xF5C518) else Color(0xB45309); else -> if (isDark) Color(0x4CAF50) else Color(0x166534) }
 
-                // ── Severity pill ──────────────────────────────────────────────
-                val sevPill = object : JLabel(sevLabelStr) {
-                    init {
-                        font       = Font(font.family, Font.BOLD, fontPt - 2)
-                        foreground = sevColorVal
-                        border     = JBUI.Borders.empty(2, 8, 2, 8)
-                        isOpaque   = false
-                    }
-                    override fun paintComponent(g: Graphics) {
-                        val g2 = g as Graphics2D
-                        g2.setRenderingHint(RenderingHints.KEY_ANTIALIASING, RenderingHints.VALUE_ANTIALIAS_ON)
-                        g2.color = sevBgVal
-                        g2.fillRoundRect(0, 0, width, height, 10, 10)
-                        super.paintComponent(g)
-                    }
-                }
-
-                // ── File + line badge ──────────────────────────────────────────
-                val fileName = ic.file.substringAfterLast('/')
-                val fileLabel = JBLabel(ic.file).apply {
-                    font       = Font(Font.MONOSPACED, Font.PLAIN, fontPt - 1)
-                    foreground = fgColor
-                }
-                val lineBadge = object : JLabel("  :${ic.line}  ") {
-                    init {
-                        font       = Font(Font.MONOSPACED, Font.BOLD, fontPt - 2)
-                        foreground = JBColor(Color(0x0550AE), Color(0x58A6FF))
-                        border     = JBUI.Borders.empty(1, 4)
-                        isOpaque   = false
-                    }
-                    override fun paintComponent(g: Graphics) {
-                        val g2 = g as Graphics2D
-                        g2.setRenderingHint(RenderingHints.KEY_ANTIALIASING, RenderingHints.VALUE_ANTIALIAS_ON)
-                        g2.color = JBColor(Color(0xDEF0FF), Color(0x0D2847))
-                        g2.fillRoundRect(0, 0, width, height, 8, 8)
-                        super.paintComponent(g)
-                    }
-                }
-
-                // ── Checkbox with "include in post" tooltip ────────────────────
-                val checkbox = JCheckBox("Post this comment").apply {
-                    isSelected = true
-                    background = cardBg
-                    font       = Font(font.family, Font.PLAIN, fontPt - 2)
-                    foreground = JBColor.GRAY
-                    toolTipText = "Uncheck to exclude from posting"
-                }
-                commentCheckboxes.add(checkbox)
-
-                // ── Editable comment text ──────────────────────────────────────
-                val textArea = JTextArea(ic.comment).apply {
-                    lineWrap      = true
-                    wrapStyleWord = true
-                    background    = if (isDark) Color(0x2B2B2B) else Color(0xF8F8F8)
-                    foreground    = fgColor
-                    font          = Font(font.family, Font.PLAIN, fontPt)
-                    border        = JBUI.Borders.empty(8, 10, 8, 10)
-                    rows          = 3
-                }
-                commentTextAreas.add(textArea)
-
-                val textAreaScroll = JBScrollPane(textArea).apply {
-                    verticalScrollBarPolicy   = JScrollPane.VERTICAL_SCROLLBAR_AS_NEEDED
-                    horizontalScrollBarPolicy = JScrollPane.HORIZONTAL_SCROLLBAR_NEVER
-                    border = javax.swing.border.LineBorder(JBColor.border(), 1, true)
-                }
-
-                // ── File/line row ──────────────────────────────────────────────
-                val fileRow = JPanel(FlowLayout(FlowLayout.LEFT, 4, 0)).apply {
-                    isOpaque = false
-                    add(fileLabel)
-                    add(lineBadge)
-                }
-
-                // ── Header row: severity pill left, checkbox right ─────────────
-                val headerRow = JPanel(BorderLayout(8, 0)).apply {
-                    isOpaque = false
-                    add(sevPill, BorderLayout.WEST)
-                    add(checkbox, BorderLayout.EAST)
-                }
-
-                // ── Card inner content ─────────────────────────────────────────
-                val innerContent = JPanel(BorderLayout(0, 6)).apply {
-                    isOpaque = false
-                    border   = JBUI.Borders.empty(10, 14, 12, 14)
-                    add(headerRow,     BorderLayout.NORTH)
-                    add(fileRow,       BorderLayout.CENTER)
-                }
-
-                val cardContent = JPanel(BorderLayout(0, 6)).apply {
-                    isOpaque = false
-                    add(innerContent, BorderLayout.NORTH)
-                    add(JPanel(BorderLayout()).apply {
-                        isOpaque = false
-                        border   = JBUI.Borders.empty(0, 14, 12, 14)
-                        add(textAreaScroll, BorderLayout.CENTER)
-                    }, BorderLayout.CENTER)
-                }
-
-                // ── Card with colored left accent border + rounded feel ─────────
-                val card = object : JPanel(BorderLayout()) {
-                    override fun paintComponent(g: Graphics) {
-                        val g2 = g as Graphics2D
-                        g2.setRenderingHint(RenderingHints.KEY_ANTIALIASING, RenderingHints.VALUE_ANTIALIAS_ON)
-                        // Card background
-                        g2.color = cardBg
-                        g2.fillRoundRect(0, 0, width, height, 8, 8)
-                        // Left accent bar (4 px wide, same height, rounded on left side)
-                        g2.color = accentVal
-                        g2.fillRoundRect(0, 0, 4, height, 4, 4)
-                    }
-                }.apply {
-                    isOpaque = false
-                    border   = JBUI.Borders.empty(0, 0, 12, 0)  // gap between cards
-                    add(cardContent, BorderLayout.CENTER)
-                    maximumSize = Dimension(Int.MAX_VALUE, preferredSize.height)
-                }
-
-                inlinePanel.add(card)
-                inlinePanel.add(Box.createVerticalStrut(4))
-            }
-        }
-
-        val inlineScroll = JBScrollPane(inlinePanel).apply {
-            verticalScrollBarPolicy   = JScrollPane.VERTICAL_SCROLLBAR_AS_NEEDED
-            horizontalScrollBarPolicy = JScrollPane.HORIZONTAL_SCROLLBAR_NEVER
-            border = null
-            background = bgColor
-        }
-
-        // ── Tabs ──────────────────────────────────────────────────────────────
-        val countLabel = if (comments.isEmpty()) "Inline Comments" else "Inline Comments  (${comments.size})"
-        val tabbedPane = javax.swing.JTabbedPane().apply {
-            addTab("📋  Summary",       summaryScroll)
-            addTab("💬  $countLabel",   inlineScroll)
-            background = bgColor
-            font       = Font(font.family, Font.PLAIN, fontPt)
-        }
-        tabbedPane.preferredSize = Dimension(1020, 700)
-
-        // ── Bottom action bar ─────────────────────────────────────────────────
-        val isGH         = info.provider == com.vitiquest.peerreview.settings.GitProvider.GITHUB
-        val isOpen       = pr.state.uppercase() == "OPEN"
-        val declineLabel = if (isGH) "Close PR" else "Decline PR"
-
-        val regenBtn = JButton(AllIcons.Actions.Refresh).apply {
-            toolTipText         = "Regenerate AI summary (clears cache)"
-            isBorderPainted     = false
-            isContentAreaFilled = false
-            preferredSize       = Dimension(28, 28)
-        }
-        val copyBtn = JButton("Copy Markdown").apply {
-            font = Font(font.family, Font.PLAIN, 11)
-        }
-
-        val postInlineBtn = JButton("💬  Post Inline Comments").apply {
-            font        = Font(font.family, Font.BOLD, 12)
-            foreground  = JBColor(Color(0x0550AE), Color(0x58A6FF))
-            isVisible   = isOpen && comments.isNotEmpty()
-            toolTipText = "Post checked inline comments to PR #${pr.id}"
-        }
-        val reqChangesBtn = JButton("🔁  Request Changes").apply {
-            font        = Font(font.family, Font.BOLD, 12)
-            foreground  = JBColor(Color(0xD97706), Color(0xF5C518))
-            isVisible   = isOpen
-            toolTipText = "Post inline comments and request changes from the PR author"
-        }
-        val approveBtn = JButton("✅  Approve").apply {
-            font        = Font(font.family, Font.BOLD, 12)
-            foreground  = JBColor(Color(0x16A34A), Color(0x4CAF50))
-            isVisible   = isOpen
-            toolTipText = "Post AI summary as comment, then approve this PR"
-        }
-        val mergeBtn = JButton("🔀  Merge").apply {
-            font        = Font(font.family, Font.BOLD, 12)
-            foreground  = JBColor(Color(0x0550AE), Color(0x58A6FF))
-            isVisible   = isOpen
-            toolTipText = "Post AI summary as comment, then merge this PR"
-        }
-        val declineBtn = JButton("❌  $declineLabel").apply {
-            font        = Font(font.family, Font.BOLD, 12)
-            foreground  = JBColor(Color(0x9F1239), Color(0xF85149))
-            isVisible   = isOpen
-            toolTipText = "Post AI summary as comment, then ${declineLabel.lowercase()} this PR"
-        }
-        val closeDialogBtn = JButton("Close").apply {
-            font = Font(font.family, Font.PLAIN, 12)
-        }
-
-        val leftBar = JPanel(FlowLayout(FlowLayout.LEFT, 4, 6)).apply {
-            isOpaque = false
-            add(regenBtn)
-            add(copyBtn)
-        }
-        val rightBar = JPanel(FlowLayout(FlowLayout.RIGHT, 6, 6)).apply {
-            isOpaque = false
-            if (isOpen) {
-                if (comments.isNotEmpty()) add(postInlineBtn)
-                add(reqChangesBtn)
-                add(JSeparator(JSeparator.VERTICAL).apply { preferredSize = Dimension(1, 26) })
-                add(approveBtn)
-                add(mergeBtn)
-                add(declineBtn)
-                add(JSeparator(JSeparator.VERTICAL).apply { preferredSize = Dimension(1, 26) })
-            }
-            add(closeDialogBtn)
-        }
-
-        val southBar = JPanel(BorderLayout()).apply {
-            border     = javax.swing.border.MatteBorder(1, 0, 0, 0, JBColor.border())
-            isOpaque   = true
-            background = bgColor
-            add(leftBar,  BorderLayout.WEST)
-            add(rightBar, BorderLayout.EAST)
-        }
-
-        // ── Dialog ────────────────────────────────────────────────────────────
-        val dialog = JDialog(
-            SwingUtilities.getWindowAncestor(this),
-            "🤖  AI Review — PR #${pr.id}: ${pr.title}",
-            java.awt.Dialog.ModalityType.APPLICATION_MODAL
-        ).apply {
-            contentPane = JPanel(BorderLayout()).apply {
-                add(tabbedPane, BorderLayout.CENTER)
-                add(southBar,   BorderLayout.SOUTH)
-            }
-            pack()
-            setLocationRelativeTo(this@PRToolWindowPanel)
-            minimumSize = Dimension(780, 540)
-            isResizable  = true
-        }
-
-        // ── Helper: collect selected (possibly edited) inline comments ─────────
-        fun selectedInlineComments(): List<InlineComment> = comments.indices
-            .filter { i -> commentCheckboxes.getOrNull(i)?.isSelected == true }
-            .map { i ->
-                val original   = comments[i]
-                val editedText = commentTextAreas.getOrNull(i)?.text?.trim() ?: original.comment
-                original.copy(comment = editedText.ifBlank { original.comment })
-            }
-
-        // ── Wire button actions ───────────────────────────────────────────────
-
-        copyBtn.addActionListener {
-            copyToClipboard(summary)
-            copyBtn.text = "✓ Copied!"
-            Timer(1500) { copyBtn.text = "Copy Markdown" }.also { t -> t.isRepeats = false; t.start() }
-        }
-
-        regenBtn.addActionListener {
-            dialog.dispose()
-            regenerateAiSummary(pr, info)
-        }
-
-        closeDialogBtn.addActionListener { dialog.dispose() }
-
-        postInlineBtn.addActionListener {
-            val selected = selectedInlineComments()
-            if (selected.isEmpty()) {
-                JOptionPane.showMessageDialog(dialog, "No inline comments selected. Check at least one comment.", "Nothing to Post", JOptionPane.INFORMATION_MESSAGE)
-                return@addActionListener
-            }
-            val ok = JOptionPane.showConfirmDialog(
-                dialog,
-                "Post ${selected.size} inline comment(s) on PR #${pr.id}?",
-                "Confirm Post",
-                JOptionPane.OK_CANCEL_OPTION
-            )
-            if (ok != JOptionPane.OK_OPTION) return@addActionListener
-            dialog.dispose()
-            setStatus("Posting ${selected.size} inline comment(s) on PR #${pr.id}…")
-            setBusy(true)
-            runInBackground {
-                try {
-                    service.postInlineComments(info.owner, info.repoSlug, pr.id, selected)
-                    val jiraMessage = runCatching {
-                        jiraService.syncReviewOutcome(pr, ReviewOutcome.CHANGES_REQUESTED, summary).userMessage()
-                    }.getOrElse { "JIRA sync failed: ${it.message}" }
-                    invokeLater {
-                        setBusy(false)
-                        notify(buildString {
-                            append("Posted ${selected.size} inline comment(s) on PR #${pr.id}.")
-                            if (!jiraMessage.isNullOrBlank()) append(" $jiraMessage")
-                        }, NotificationType.INFORMATION)
-                        setStatus("Inline comments posted.")
-                    }
-                } catch (e: Exception) {
-                    invokeLater {
-                        setBusy(false)
-                        setStatus("Failed to post inline comments.")
-                        Messages.showErrorDialog(project, e.message ?: "Unknown error", "Post Inline Comments Failed")
-                    }
-                }
-            }
-        }
-
-        reqChangesBtn.addActionListener {
-            val selected = selectedInlineComments()
-            val confirmMsg = buildString {
-                append("Request changes on PR #${pr.id}?")
-                if (selected.isNotEmpty()) append("\n\nThis will post ${selected.size} inline comment(s) and\nmark the PR as 'Changes Requested'.")
-                else append("\n\nNo inline comments are selected — only a top-level 'Changes Requested' comment will be posted.")
-            }
-            val ok = JOptionPane.showConfirmDialog(dialog, confirmMsg, "Confirm Request Changes", JOptionPane.OK_CANCEL_OPTION, JOptionPane.WARNING_MESSAGE)
-            if (ok != JOptionPane.OK_OPTION) return@addActionListener
-            dialog.dispose()
-            setStatus("Requesting changes on PR #${pr.id}…")
-            setBusy(true)
-            runInBackground {
-                try {
-                    service.requestChanges(info.owner, info.repoSlug, pr.id, summary, selected)
-                    val jiraMessage = runCatching {
-                        jiraService.syncReviewOutcome(pr, ReviewOutcome.CHANGES_REQUESTED, summary).userMessage()
-                    }.getOrElse { "JIRA sync failed: ${it.message}" }
-                    invokeLater {
-                        setBusy(false)
-                        notify(buildString {
-                            append("Changes requested on PR #${pr.id}.")
-                            if (!jiraMessage.isNullOrBlank()) append(" $jiraMessage")
-                        }, NotificationType.WARNING)
-                        loadPullRequests()
-                    }
-                } catch (e: Exception) {
-                    invokeLater {
-                        setBusy(false)
-                        setStatus("Request changes failed.")
-                        Messages.showErrorDialog(project, e.message ?: "Unknown error", "Request Changes Failed")
-                    }
-                }
-            }
-        }
-
-        fun executeWithOptionalComment(actionLabel: String, reviewOutcome: ReviewOutcome, action: () -> Unit) {
-            val choice = JOptionPane.showOptionDialog(
-                dialog,
-                "Post AI summary as a comment on PR #${pr.id} before ${actionLabel.lowercase()}ing?",
-                "Confirm $actionLabel",
-                JOptionPane.YES_NO_CANCEL_OPTION,
-                JOptionPane.QUESTION_MESSAGE,
-                null,
-                arrayOf("Post & $actionLabel", "$actionLabel only", "Cancel"),
-                "Post & $actionLabel"
-            )
-            if (choice == 2 || choice == JOptionPane.CLOSED_OPTION) return
-
-            dialog.dispose()
-            setStatus("${actionLabel}ing PR #${pr.id}…")
-            runInBackground {
-                try {
-                    if (choice == 0) service.postComment(info.owner, info.repoSlug, pr.id, summary)
-                    action()
-                    val jiraMessage = runCatching {
-                        jiraService.syncReviewOutcome(
-                            pr      = pr,
-                            outcome = reviewOutcome,
-                            summary = if (reviewOutcome == ReviewOutcome.DECLINED) summary else null
-                        ).userMessage()
-                    }.getOrElse { "JIRA sync failed: ${it.message}" }
-                    invokeLater {
-                        notify(buildString {
-                            append("PR #${pr.id} ${actionLabel.lowercase()}d.")
-                            if (!jiraMessage.isNullOrBlank()) append(" $jiraMessage")
-                        }, NotificationType.INFORMATION)
-                        loadPullRequests()
-                    }
-                } catch (e: Exception) {
-                    invokeLater {
-                        setStatus("$actionLabel failed.")
-                        Messages.showErrorDialog(project, e.message ?: "Unknown error", "$actionLabel PR #${pr.id} Failed")
-                    }
-                }
-            }
-        }
-
-        approveBtn.addActionListener  { executeWithOptionalComment("Approve", ReviewOutcome.APPROVED)  { service.approvePullRequest(info.owner, info.repoSlug, pr.id) } }
-        mergeBtn.addActionListener    { executeWithOptionalComment("Merge",   ReviewOutcome.MERGED)    { service.mergePullRequest(info.owner, info.repoSlug, pr.id) } }
-        declineBtn.addActionListener  { executeWithOptionalComment(if (isGH) "Close" else "Decline", ReviewOutcome.DECLINED) { service.declinePullRequest(info.owner, info.repoSlug, pr.id) } }
-
-        dialog.isVisible = true
-    }
-
-    // =========================================================================
-    // Lightweight Markdown → HTML converter
-    // Handles all patterns the AI summary prompt generates.
-    // =========================================================================
-
-    private fun markdownToHtml(md: String): String {
-        val lines  = md.lines()
-        val sb     = StringBuilder()
-        var inPre  = false
-        var inUl   = false
-        var inOl   = false
-        var inTable = false
-
-        fun closeLists() {
-            if (inUl)  { sb.append("</ul>\n");  inUl  = false }
-            if (inOl)  { sb.append("</ol>\n");  inOl  = false }
-        }
-        fun closeTable() {
-            if (inTable) { sb.append("</table>\n"); inTable = false }
-        }
-
-        for (raw in lines) {
-            val line = raw.trimEnd()
-
-            // ── Fenced code block ─────────────────────────────────────────────
-            if (line.startsWith("```")) {
-                closeLists(); closeTable()
-                if (!inPre) { sb.append("<pre>"); inPre = true }
-                else        { sb.append("</pre>\n"); inPre = false }
-                continue
-            }
-            if (inPre) { sb.append(line.escapeHtml()).append("\n"); continue }
-
-            // ── Headings ──────────────────────────────────────────────────────
-            val h3 = Regex("^### (.+)").find(line)
-            val h2 = Regex("^## (.+)").find(line)
-            val h1 = Regex("^# (.+)").find(line)
-            when {
-                h1 != null -> { closeLists(); closeTable()
-                    sb.append("<h1>${h1.groupValues[1].inline()}</h1>\n"); continue }
-                h2 != null -> { closeLists(); closeTable()
-                    sb.append("<h2>${h2.groupValues[1].inline()}</h2>\n"); continue }
-                h3 != null -> { closeLists(); closeTable()
-                    sb.append("<h3>${h3.groupValues[1].inline()}</h3>\n"); continue }
-            }
-
-            // ── HR ────────────────────────────────────────────────────────────
-            if (line.matches(Regex("^-{3,}|\\*{3,}|_{3,}$"))) {
-                closeLists(); closeTable()
-                sb.append("<hr/>\n"); continue
-            }
-
-            // ── Table row ─────────────────────────────────────────────────────
-            if (line.startsWith("|")) {
-                closeLists()
-                val cells = line.split("|").drop(1).dropLast(1)
-                // Separator row (|---|---| or |:---:|:---:|)
-                if (cells.all { it.trim().matches(Regex("^:?-+:?$")) }) continue
-                if (!inTable) {
-                    sb.append("<table>\n")
-                    inTable = true
-                    // First row → header
-                    sb.append("<tr>")
-                    cells.forEach { sb.append("<th>${it.trim().inline()}</th>") }
-                    sb.append("</tr>\n")
-                } else {
-                    sb.append("<tr>")
-                    cells.forEach { sb.append("<td>${it.trim().inline()}</td>") }
-                    sb.append("</tr>\n")
-                }
-                continue
-            } else {
-                closeTable()
-            }
-
-            // ── Unordered list ────────────────────────────────────────────────
-            val ulMatch = Regex("^([-*+]) (.+)").find(line)
-            if (ulMatch != null) {
-                if (inOl) { sb.append("</ol>\n"); inOl = false }
-                if (!inUl) { sb.append("<ul>\n"); inUl = true }
-                sb.append("<li>${ulMatch.groupValues[2].inline()}</li>\n"); continue
-            }
-
-            // ── Ordered list ──────────────────────────────────────────────────
-            val olMatch = Regex("^\\d+\\. (.+)").find(line)
-            if (olMatch != null) {
-                if (inUl) { sb.append("</ul>\n"); inUl = false }
-                if (!inOl) { sb.append("<ol>\n"); inOl = true }
-                sb.append("<li>${olMatch.groupValues[1].inline()}</li>\n"); continue
-            }
-
-            // ── Blockquote ────────────────────────────────────────────────────
-            val bqMatch = Regex("^> (.+)").find(line)
-            if (bqMatch != null) {
-                closeLists(); closeTable()
-                sb.append("<blockquote>${bqMatch.groupValues[1].inline()}</blockquote>\n"); continue
-            }
-
-            // ── Blank line ────────────────────────────────────────────────────
-            if (line.isBlank()) {
-                closeLists(); closeTable()
-                sb.append("<br/>\n"); continue
-            }
-
-            // ── Plain paragraph ───────────────────────────────────────────────
-            closeLists(); closeTable()
-            sb.append("<p>${line.inline()}</p>\n")
-        }
-
-        closeLists(); closeTable()
-        if (inPre) sb.append("</pre>\n")
-        return sb.toString()
-    }
-
-    /** Inline markdown: bold, italic, inline code, links */
-    private fun String.inline(): String = this
-        .escapeHtml()
-        .replace(Regex("`([^`]+)`"),        "<code>$1</code>")
-        .replace(Regex("\\*\\*([^*]+)\\*\\*"), "<strong>$1</strong>")
-        .replace(Regex("__([^_]+)__"),        "<strong>$1</strong>")
-        .replace(Regex("\\*([^*]+)\\*"),      "<em>$1</em>")
-        .replace(Regex("_([^_]+)_"),          "<em>$1</em>")
-        .replace(Regex("\\[([^]]+)]\\(([^)]+)\\)"), "<a href=\"$2\">$1</a>")
-
-    private fun String.escapeHtml(): String = this
-        .replace("&", "&amp;")
-        .replace("<", "&lt;")
-        .replace(">", "&gt;")
-
-    private fun java.awt.Color.toHex(): String =
-        "%02X%02X%02X".format(red, green, blue)
-
-    private fun copyToClipboard(text: String) {
-        java.awt.Toolkit.getDefaultToolkit().systemClipboard
-            .setContents(java.awt.datatransfer.StringSelection(text), null)
-    }
 
     // =========================================================================
     // Approve / Decline
@@ -1766,182 +926,4 @@ class PRToolWindowPanel(private val project: Project) : JPanel(BorderLayout()), 
     }
 }
 
-// =============================================================================
-// PR Card Renderer (unchanged visual style)
-// =============================================================================
 
-private class PRCardRenderer(
-    private val fileCountCache: Map<Int, Int>
-) : ListCellRenderer<PullRequest> {
-    private val DATE_IN  = DateTimeFormatter.ISO_OFFSET_DATE_TIME
-    private val DATE_OUT = DateTimeFormatter.ofPattern("MMM dd, yyyy")
-
-    override fun getListCellRendererComponent(
-        list: JList<out PullRequest>, value: PullRequest?, index: Int,
-        isSelected: Boolean, cellHasFocus: Boolean
-    ): Component {
-        val pr = value ?: return JLabel()
-        val card = JPanel(BorderLayout(0, 2)).apply {
-            border     = JBUI.Borders.empty(8, 12, 8, 12)
-            background = if (isSelected) list.selectionBackground else list.background
-        }
-        val topRow   = JPanel(BorderLayout(8, 0)).apply { isOpaque = false }
-        val idBadge  = JLabel("#${pr.id}").apply {
-            font = Font(font.family, Font.BOLD, 11)
-            foreground = JBColor(Color(0x0969DA), Color(0x58A6FF))
-        }
-        val titleLbl = JLabel(pr.title).apply {
-            font = Font(font.family, Font.BOLD, 13)
-            foreground = if (isSelected) list.selectionForeground else list.foreground
-        }
-        val titleRow = JPanel(FlowLayout(FlowLayout.LEFT, 6, 0)).apply {
-            isOpaque = false; add(idBadge); add(titleLbl)
-        }
-        topRow.add(titleRow, BorderLayout.CENTER)
-        topRow.add(StatePill(pr.state), BorderLayout.EAST)
-
-        val updatedText = pr.updatedOn.runCatching {
-            DATE_OUT.format(DATE_IN.parse(this)) }.getOrElse { pr.updatedOn.take(10) }
-
-        val meta = buildString {
-            val b = pr.source.branch.name; val d = pr.destination.branch.name
-            if (b.isNotBlank() && d.isNotBlank()) append("$b  →  $d")
-            if (pr.author.displayName.isNotBlank()) append("   ·   👤 ${pr.author.displayName}")
-            if (updatedText.isNotBlank()) append("   ·   🕒 $updatedText")
-            if (pr.commentCount > 0) append("   ·   💬 ${pr.commentCount}")
-            fileCountCache[pr.id]?.let { n ->
-                append("   ·   📄 $n file${if (n == 1) "" else "s"}")
-            }
-        }
-        val metaLbl = JLabel(meta).apply {
-            font = Font(font.family, Font.PLAIN, 11); foreground = JBColor.GRAY
-        }
-        card.add(topRow, BorderLayout.CENTER)
-        card.add(metaLbl, BorderLayout.SOUTH)
-        return JPanel(BorderLayout()).apply {
-            isOpaque = false
-            add(card, BorderLayout.CENTER)
-            add(JSeparator(), BorderLayout.SOUTH)
-        }
-    }
-}
-
-// =============================================================================
-// File Entry Renderer — filename + status on row 1, package/dir on row 2
-// =============================================================================
-
-private class FileEntryRenderer : ListCellRenderer<FileDiffEntry> {
-
-    override fun getListCellRendererComponent(
-        list: JList<out FileDiffEntry>, value: FileDiffEntry?, index: Int,
-        isSelected: Boolean, cellHasFocus: Boolean
-    ): Component {
-        val entry = value ?: return JLabel()
-
-        val bg = if (isSelected) list.selectionBackground else list.background
-        val fg = if (isSelected) list.selectionForeground else list.foreground
-
-        // ── file icon ─────────────────────────────────────────────────────────
-        val ext      = entry.newPath.substringAfterLast('.', "")
-        val fileIcon = FileTypeManager.getInstance().getFileTypeByExtension(ext).icon
-            ?: AllIcons.FileTypes.Unknown
-
-        // ── status badge ──────────────────────────────────────────────────────
-        val (statusIcon, statusColor, statusBg) = when (entry.statusTag) {
-            "ADDED"   -> Triple(AllIcons.General.Add,     JBColor(Color(0x166534), Color(0x3FB950)), JBColor(Color(0xDCFCE7), Color(0x1A3325)))
-            "DELETED" -> Triple(AllIcons.General.Remove,  JBColor(Color(0x9F1239), Color(0xF85149)), JBColor(Color(0xFFE4E6), Color(0x3B1219)))
-            "RENAMED" -> Triple(AllIcons.Actions.Forward, JBColor(Color(0x0550AE), Color(0x58A6FF)), JBColor(Color(0xDEF0FF), Color(0x0D2847)))
-            else      -> Triple(AllIcons.Actions.Edit,    JBColor(Color(0x953800), Color(0xD29922)), JBColor(Color(0xFFF8E7), Color(0x2E1F00)))
-        }
-
-        // ── path split: filename vs directory ─────────────────────────────────
-        val displayPath = entry.displayLabel
-        val fileName    = displayPath.substringAfterLast('/').substringAfterLast('\\')
-        val dirPart     = displayPath.removeSuffix(fileName).trimEnd('/', '\\')
-
-        // ── ROW 1: file icon + bold filename + status pill on right ───────────
-        val fileNameLabel = JLabel(fileName).apply {
-            font        = Font(font.family, Font.BOLD, 13)
-            foreground  = fg
-            icon        = fileIcon
-            iconTextGap = 6
-        }
-
-        // Inline status pill (painted label with rounded bg)
-        val statusPill = object : JLabel(entry.statusTag) {
-            init {
-                icon        = statusIcon
-                iconTextGap = 4
-                font        = Font(font.family, Font.BOLD, 10)
-                foreground  = statusColor
-                border      = JBUI.Borders.empty(2, 7, 2, 7)
-                isOpaque    = false
-            }
-            override fun paintComponent(g: Graphics) {
-                val g2 = g as Graphics2D
-                g2.setRenderingHint(RenderingHints.KEY_ANTIALIASING, RenderingHints.VALUE_ANTIALIAS_ON)
-                g2.color = statusBg
-                g2.fillRoundRect(0, 0, width, height, height, height)
-                super.paintComponent(g)
-            }
-        }
-
-        val topRow = JPanel(BorderLayout(0, 0)).apply {
-            isOpaque = false
-            add(fileNameLabel, BorderLayout.CENTER)
-            val pillWrap = JPanel(FlowLayout(FlowLayout.RIGHT, 0, 0)).apply { isOpaque = false; add(statusPill) }
-            add(pillWrap, BorderLayout.EAST)
-        }
-
-        // ── ROW 2: directory / package path ───────────────────────────────────
-        val dirLabel = JLabel(if (dirPart.isNotBlank()) dirPart else "· root").apply {
-            font       = Font(font.family, Font.PLAIN, 11)
-            foreground = JBColor.GRAY
-            border     = JBUI.Borders.empty(1, 22, 0, 0)   // indent to align under filename (icon width ≈ 16 + 6 gap)
-        }
-
-        // ── Card ──────────────────────────────────────────────────────────────
-        val card = JPanel(BorderLayout(0, 3)).apply {
-            border     = JBUI.Borders.empty(8, 12, 8, 12)
-            background = bg
-            isOpaque   = true
-            add(topRow,   BorderLayout.CENTER)
-            add(dirLabel, BorderLayout.SOUTH)
-        }
-
-        return JPanel(BorderLayout()).apply {
-            isOpaque = false
-            add(card, BorderLayout.CENTER)
-            add(JSeparator(), BorderLayout.SOUTH)
-        }
-    }
-}
-
-// =============================================================================
-// State Pill (reused by both renderers)
-// =============================================================================
-
-private class StatePill(state: String) : JComponent() {
-    private val label = state.uppercase()
-    private val bg: Color = when (label) {
-        "OPEN"     -> JBColor(Color(0xDCFCE7), Color(0x1A3325))
-        "MERGED"   -> JBColor(Color(0xF3E8FF), Color(0x2D1F42))
-        "DECLINED" -> JBColor(Color(0xFFE4E6), Color(0x3B1219))
-        else       -> JBColor(Color(0xF0F0F0), Color(0x2A2A2A))
-    }
-    private val fg: Color = when (label) {
-        "OPEN"     -> JBColor(Color(0x166534), Color(0x3FB950))
-        "MERGED"   -> JBColor(Color(0x6B21A8), Color(0xA371F7))
-        "DECLINED" -> JBColor(Color(0x9F1239), Color(0xF85149))
-        else       -> JBColor.GRAY
-    }
-    init { preferredSize = Dimension(72, 20); isOpaque = false; toolTipText = label }
-    override fun paintComponent(g: Graphics) {
-        val g2 = g as Graphics2D
-        g2.setRenderingHint(RenderingHints.KEY_ANTIALIASING, RenderingHints.VALUE_ANTIALIAS_ON)
-        g2.color = bg; g2.fillRoundRect(0, 0, width, height, height, height)
-        g2.color = fg; g2.font = Font(font.family, Font.BOLD, 10)
-        val fm = g2.fontMetrics
-        g2.drawString(label, (width - fm.stringWidth(label)) / 2, (height + fm.ascent - fm.descent) / 2)
-    }
-}

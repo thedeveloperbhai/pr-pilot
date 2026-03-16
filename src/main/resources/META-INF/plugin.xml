@@ -22,7 +22,7 @@
             id="PR Pilot"
             anchor="right"
             factoryClass="com.vitiquest.peerreview.ui.PRToolWindowFactory"
-            icon="AllIcons.Vcs.Branch"/>
+            icon="/icons/toolWindow.svg"/>
 
         <!-- Persistent Settings -->
         <applicationService
