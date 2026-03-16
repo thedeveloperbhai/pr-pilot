@@ -123,18 +123,6 @@ class OpenAIClient(private val project: Project? = null) {
             )
         )
 
-        // ── Debug: print the full prompt being sent to the LLM ───────────────
-        println("\n========== [PR Pilot] LLM REQUEST ==========")
-        println("URL  : $url")
-        println("Model: $model")
-        messages.forEachIndexed { i, msg ->
-            val role    = msg["role"] ?: "?"
-            val content = msg["content"] ?: ""
-            println("\n--- Message[$i] role=$role (${content.length} chars) ---")
-            println(content)
-        }
-        println("============================================\n")
-
         val requestBuilder = Request.Builder()
             .url(url)
             .header("Content-Type", "application/json")

@@ -6,7 +6,8 @@ import com.vitiquest.peerreview.settings.PluginSettings
 enum class ReviewOutcome {
     APPROVED,
     MERGED,
-    DECLINED
+    DECLINED,
+    CHANGES_REQUESTED
 }
 
 enum class JiraSyncStatus {
@@ -58,10 +59,12 @@ class JiraIntegrationService {
             ReviewOutcome.MERGED -> "Code Review Passed."
             ReviewOutcome.DECLINED -> summary?.trim().takeUnless { it.isNullOrBlank() }
                 ?: "PR was declined. AI summary was unavailable."
+            ReviewOutcome.CHANGES_REQUESTED -> summary?.trim().takeUnless { it.isNullOrBlank() }
+                ?: "Changes requested on PR. AI summary was unavailable."
         }
         client.addPlainTextComment(issueKey, commentBody)
 
-        if (outcome != ReviewOutcome.DECLINED) {
+        if (outcome == ReviewOutcome.APPROVED || outcome == ReviewOutcome.MERGED) {
             return JiraSyncResult(JiraSyncStatus.UPDATED, issueKey = issueKey)
         }
 

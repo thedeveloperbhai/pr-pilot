@@ -21,6 +21,7 @@ import com.intellij.ui.components.JBLabel
 import com.intellij.ui.components.JBList
 import com.intellij.ui.components.JBScrollPane
 import com.intellij.ui.components.JBTextField
+import com.intellij.util.ui.AsyncProcessIcon
 import com.intellij.util.ui.JBUI
 import com.vitiquest.peerreview.ai.AiReviewResult
 import com.vitiquest.peerreview.ai.InlineComment
@@ -81,6 +82,7 @@ class PRToolWindowPanel(private val project: Project) : JPanel(BorderLayout()), 
 
     // ── status bar (shared across both views) ─────────────────────────────────
     private val statusLabel = JBLabel("Ready")
+    private val spinner     = AsyncProcessIcon("pr-pilot-spinner").apply { isVisible = false }
 
     // ── PR list view components ───────────────────────────────────────────────
     private val listModel        = DefaultListModel<PullRequest>()
@@ -104,6 +106,11 @@ class PRToolWindowPanel(private val project: Project) : JPanel(BorderLayout()), 
     init {
         buildUi()
         detectRepo()
+        // Show the welcome screen on very first load
+        if (!PluginSettings.instance.welcomeShown) {
+            PluginSettings.instance.welcomeShown = true
+            SwingUtilities.invokeLater { WelcomeDialog.show(this) }
+        }
     }
 
     // =========================================================================
@@ -119,7 +126,21 @@ class PRToolWindowPanel(private val project: Project) : JPanel(BorderLayout()), 
         val statusBar = JPanel(BorderLayout()).apply {
             border = MatteBorder(1, 0, 0, 0, JBColor.border())
             background = JBColor.PanelBackground
-            add(statusLabel.apply { border = JBUI.Borders.empty(3, 8, 3, 8) }, BorderLayout.WEST)
+            val left = JPanel(FlowLayout(FlowLayout.LEFT, 4, 0)).apply {
+                isOpaque = false
+                add(spinner)
+                add(statusLabel.apply { border = JBUI.Borders.empty(3, 4, 3, 4) })
+            }
+            val helpBtn = JButton(AllIcons.General.Information).apply {
+                toolTipText         = "PR Pilot — Documentation & Help"
+                isBorderPainted     = false
+                isContentAreaFilled = false
+                preferredSize       = Dimension(22, 22)
+                cursor              = Cursor.getPredefinedCursor(Cursor.HAND_CURSOR)
+                addActionListener   { WelcomeDialog.show(this@PRToolWindowPanel) }
+            }
+            add(left, BorderLayout.WEST)
+            add(helpBtn, BorderLayout.EAST)
         }
 
         add(cardPanel,  BorderLayout.CENTER)
@@ -465,14 +486,16 @@ class PRToolWindowPanel(private val project: Project) : JPanel(BorderLayout()), 
         val info = repoInfo ?: run { setStatus("⚠ Repository not detected."); return }
         val selectedState = stateFilter.selectedItem as String
         setStatus("Loading pull requests…")
+        setBusy(true)
         runInBackground {
             try {
                 val prs = service.getPullRequests(info.owner, info.repoSlug, selectedState)
                 allPrs = prs
-                invokeLater { applyFilter(); setStatus("${prs.size} PR(s) loaded.") }
+                invokeLater { setBusy(false); applyFilter(); setStatus("${prs.size} PR(s) loaded.") }
             } catch (e: Exception) {
                 val msg = e.message ?: "Unknown error"
                 invokeLater {
+                    setBusy(false)
                     setStatus("⚠ Failed to load PRs — see error dialog.")
                     val isAuthError = msg.contains("401") || msg.contains("No Access Token") ||
                                       msg.contains("No PAT") || msg.contains("Invalid or expired")
@@ -504,11 +527,13 @@ class PRToolWindowPanel(private val project: Project) : JPanel(BorderLayout()), 
         val pr   = selectedPr() ?: return
         val info = repoInfo ?: return
         setStatus("Fetching diff for PR #${pr.id}…")
+        setBusy(true)
         runInBackground {
             try {
                 val rawDiff = service.getPullRequestDiff(info.owner, info.repoSlug, pr.id)
                 val entries = parseDiffToEntries(rawDiff)
                 invokeLater {
+                    setBusy(false)
                     if (entries.isEmpty()) {
                         JOptionPane.showMessageDialog(this, "No changes found in PR #${pr.id}.",
                             "No Diff", JOptionPane.INFORMATION_MESSAGE)
@@ -519,6 +544,7 @@ class PRToolWindowPanel(private val project: Project) : JPanel(BorderLayout()), 
             } catch (e: Exception) {
                 val msg = e.message ?: "Unknown error"
                 invokeLater {
+                    setBusy(false)
                     setStatus("⚠ Diff error — see error dialog.")
                     Messages.showErrorDialog(project, msg, "Fetch Diff Failed")
                 }
@@ -696,17 +722,20 @@ class PRToolWindowPanel(private val project: Project) : JPanel(BorderLayout()), 
 
     private fun generateAiSummary(pr: PullRequest, info: RepoInfo, forceRegenerate: Boolean) {
         setStatus("${if (forceRegenerate) "Regenerating" else "Building"} AI summary for PR #${pr.id}…")
+        setBusy(true)
         runInBackground {
             try {
                 val rawText = buildAiSummaryText(pr, info)
                 val result  = parseAiResponse(rawText)
                 invokeLater {
+                    setBusy(false)
                     aiSummaryCache[pr.id] = result
                     showSummaryDialog(pr, result, info)
                     setStatus("AI summary generated (${result.inlineComments.size} inline comment(s)).")
                 }
             } catch (e: Exception) {
                 invokeLater {
+                    setBusy(false)
                     setStatus("AI error: ${e.message}")
                     Messages.showErrorDialog(project, e.message ?: "Unknown error", "AI Summary Failed")
                 }
@@ -725,15 +754,10 @@ class PRToolWindowPanel(private val project: Project) : JPanel(BorderLayout()), 
         val startTag = "<!-- INLINE_COMMENTS_START -->"
         val endTag   = "<!-- INLINE_COMMENTS_END -->"
 
-        println("[PR Pilot] Raw AI response (${rawText.length} chars):\n${rawText.take(500)}…")
-
         val startIdx = rawText.indexOf(startTag)
         val endIdx   = rawText.indexOf(endTag)
 
-        println("[PR Pilot] parseAiResponse: startIdx=$startIdx endIdx=$endIdx")
-
         if (startIdx == -1 || endIdx == -1 || endIdx <= startIdx) {
-            println("[PR Pilot] WARNING: Inline comments block not found in AI response. Returning summary-only.")
             return AiReviewResult.ofSummaryOnly(rawText.trim())
         }
 
@@ -742,15 +766,10 @@ class PRToolWindowPanel(private val project: Project) : JPanel(BorderLayout()), 
         val rawJson  = rawText.substring(startIdx + startTag.length, endIdx).trim()
             .removePrefix("```json").removePrefix("```").removeSuffix("```").trim()
 
-        println("[PR Pilot] Inline JSON to parse:\n$rawJson")
-
         val inlineComments = try {
             val mapper = jacksonObjectMapper()
-            val parsed = mapper.readValue<List<InlineComment>>(rawJson)
-            println("[PR Pilot] Parsed ${parsed.size} inline comment(s).")
-            parsed
+            mapper.readValue<List<InlineComment>>(rawJson)
         } catch (e: Exception) {
-            println("[PR Pilot] ERROR parsing inline comments JSON: ${e.message}")
             emptyList()
         }
 
@@ -995,61 +1014,24 @@ class PRToolWindowPanel(private val project: Project) : JPanel(BorderLayout()), 
             inlinePanel.add(emptyBox)
         } else {
             for ((idx, ic) in comments.withIndex()) {
-                val (sevLabel, sevColor, sevBg, accentColor) = when (ic.severity.lowercase()) {
-                    "critical" -> arrayOf(
-                        "🔴  CRITICAL",
-                        JBColor(Color(0xC0392B), Color(0xFF6B6B)),
-                        JBColor(Color(0xFFF0EE), Color(0x3D1A1A)),
-                        Color(0xC0392B)
-                    )
-                    "warning"  -> arrayOf(
-                        "🟡  WARNING",
-                        JBColor(Color(0xB45309), Color(0xF5C518)),
-                        JBColor(Color(0xFFFBEB), Color(0x2E2000)),
-                        Color(0xB45309)
-                    )
-                    else       -> arrayOf(
-                        "🟢  SUGGESTION",
-                        JBColor(Color(0x166534), Color(0x4CAF50)),
-                        JBColor(Color(0xF0FFF4), Color(0x0D2E18)),
-                        Color(0x166534)
-                    )
-                }
-
-                @Suppress("UNCHECKED_CAST")
-                val sevLabelStr  = sevLabel as JBColor
-                @Suppress("UNCHECKED_CAST")
-                val sevColorVal  = sevColor as JBColor
-                @Suppress("UNCHECKED_CAST")
-                val sevBgVal     = sevBg as JBColor
-                @Suppress("UNCHECKED_CAST")
-                val accentVal    = accentColor as Color
+                val sev          = ic.severity.lowercase()
+                val sevLabelStr  = when (sev) { "critical" -> "🔴  CRITICAL"; "warning" -> "🟡  WARNING"; else -> "🟢  SUGGESTION" }
+                val sevColorVal  = when (sev) { "critical" -> JBColor(Color(0xC0392B), Color(0xFF6B6B)); "warning" -> JBColor(Color(0xB45309), Color(0xF5C518)); else -> JBColor(Color(0x166534), Color(0x4CAF50)) }
+                val sevBgVal     = when (sev) { "critical" -> JBColor(Color(0xFFF0EE), Color(0x3D1A1A)); "warning" -> JBColor(Color(0xFFFBEB), Color(0x2E2000)); else -> JBColor(Color(0xF0FFF4), Color(0x0D2E18)) }
+                val accentVal    = when (sev) { "critical" -> Color(0xC0392B); "warning" -> Color(0xB45309); else -> Color(0x166534) }
 
                 // ── Severity pill ──────────────────────────────────────────────
-                val sevPill = object : JLabel(when (ic.severity.lowercase()) {
-                    "critical"   -> "🔴  CRITICAL"
-                    "warning"    -> "🟡  WARNING"
-                    else         -> "🟢  SUGGESTION"
-                }) {
+                val sevPill = object : JLabel(sevLabelStr) {
                     init {
                         font       = Font(font.family, Font.BOLD, fontPt - 2)
-                        foreground = when (ic.severity.lowercase()) {
-                            "critical" -> JBColor(Color(0xC0392B), Color(0xFF6B6B))
-                            "warning"  -> JBColor(Color(0xB45309), Color(0xF5C518))
-                            else       -> JBColor(Color(0x166534), Color(0x4CAF50))
-                        }
+                        foreground = sevColorVal
                         border     = JBUI.Borders.empty(2, 8, 2, 8)
                         isOpaque   = false
                     }
                     override fun paintComponent(g: Graphics) {
                         val g2 = g as Graphics2D
                         g2.setRenderingHint(RenderingHints.KEY_ANTIALIASING, RenderingHints.VALUE_ANTIALIAS_ON)
-                        val pillBg = when (ic.severity.lowercase()) {
-                            "critical" -> JBColor(Color(0xFFF0EE), Color(0x3D1A1A))
-                            "warning"  -> JBColor(Color(0xFFFBEB), Color(0x2E2000))
-                            else       -> JBColor(Color(0xF0FFF4), Color(0x0D2E18))
-                        }
-                        g2.color = pillBg
+                        g2.color = sevBgVal
                         g2.fillRoundRect(0, 0, width, height, 10, 10)
                         super.paintComponent(g)
                     }
@@ -1138,12 +1120,6 @@ class PRToolWindowPanel(private val project: Project) : JPanel(BorderLayout()), 
                 }
 
                 // ── Card with colored left accent border + rounded feel ─────────
-                val accentColorForSev = when (ic.severity.lowercase()) {
-                    "critical" -> JBColor(Color(0xC0392B), Color(0xFF6B6B))
-                    "warning"  -> JBColor(Color(0xD97706), Color(0xF5C518))
-                    else       -> JBColor(Color(0x16A34A), Color(0x4CAF50))
-                }
-
                 val card = object : JPanel(BorderLayout()) {
                     override fun paintComponent(g: Graphics) {
                         val g2 = g as Graphics2D
@@ -1152,7 +1128,7 @@ class PRToolWindowPanel(private val project: Project) : JPanel(BorderLayout()), 
                         g2.color = cardBg
                         g2.fillRoundRect(0, 0, width, height, 8, 8)
                         // Left accent bar (4 px wide, same height, rounded on left side)
-                        g2.color = accentColorForSev
+                        g2.color = accentVal
                         g2.fillRoundRect(0, 0, 4, height, 4, 4)
                     }
                 }.apply {
@@ -1315,15 +1291,24 @@ class PRToolWindowPanel(private val project: Project) : JPanel(BorderLayout()), 
             if (ok != JOptionPane.OK_OPTION) return@addActionListener
             dialog.dispose()
             setStatus("Posting ${selected.size} inline comment(s) on PR #${pr.id}…")
+            setBusy(true)
             runInBackground {
                 try {
                     service.postInlineComments(info.owner, info.repoSlug, pr.id, selected)
+                    val jiraMessage = runCatching {
+                        jiraService.syncReviewOutcome(pr, ReviewOutcome.CHANGES_REQUESTED, summary).userMessage()
+                    }.getOrElse { "JIRA sync failed: ${it.message}" }
                     invokeLater {
-                        notify("Posted ${selected.size} inline comment(s) on PR #${pr.id}.", NotificationType.INFORMATION)
+                        setBusy(false)
+                        notify(buildString {
+                            append("Posted ${selected.size} inline comment(s) on PR #${pr.id}.")
+                            if (!jiraMessage.isNullOrBlank()) append(" $jiraMessage")
+                        }, NotificationType.INFORMATION)
                         setStatus("Inline comments posted.")
                     }
                 } catch (e: Exception) {
                     invokeLater {
+                        setBusy(false)
                         setStatus("Failed to post inline comments.")
                         Messages.showErrorDialog(project, e.message ?: "Unknown error", "Post Inline Comments Failed")
                     }
@@ -1342,13 +1327,15 @@ class PRToolWindowPanel(private val project: Project) : JPanel(BorderLayout()), 
             if (ok != JOptionPane.OK_OPTION) return@addActionListener
             dialog.dispose()
             setStatus("Requesting changes on PR #${pr.id}…")
+            setBusy(true)
             runInBackground {
                 try {
                     service.requestChanges(info.owner, info.repoSlug, pr.id, summary, selected)
                     val jiraMessage = runCatching {
-                        jiraService.syncReviewOutcome(pr, ReviewOutcome.DECLINED, summary).userMessage()
+                        jiraService.syncReviewOutcome(pr, ReviewOutcome.CHANGES_REQUESTED, summary).userMessage()
                     }.getOrElse { "JIRA sync failed: ${it.message}" }
                     invokeLater {
+                        setBusy(false)
                         notify(buildString {
                             append("Changes requested on PR #${pr.id}.")
                             if (!jiraMessage.isNullOrBlank()) append(" $jiraMessage")
@@ -1357,6 +1344,7 @@ class PRToolWindowPanel(private val project: Project) : JPanel(BorderLayout()), 
                     }
                 } catch (e: Exception) {
                     invokeLater {
+                        setBusy(false)
                         setStatus("Request changes failed.")
                         Messages.showErrorDialog(project, e.message ?: "Unknown error", "Request Changes Failed")
                     }
@@ -1561,6 +1549,7 @@ class PRToolWindowPanel(private val project: Project) : JPanel(BorderLayout()), 
         if (Messages.showYesNoDialog(project, "$actionLabel PR #${pr.id}: \"${pr.title}\"?",
                 "Confirm Approve", Messages.getQuestionIcon()) != Messages.YES) return
         setStatus("Approving PR #${pr.id}…")
+        setBusy(true)
         runInBackground {
             try {
                 service.approvePullRequest(info.owner, info.repoSlug, pr.id)
@@ -1568,6 +1557,7 @@ class PRToolWindowPanel(private val project: Project) : JPanel(BorderLayout()), 
                     jiraService.syncReviewOutcome(pr, ReviewOutcome.APPROVED).userMessage()
                 }.getOrElse { "JIRA sync failed: ${it.message}" }
                 invokeLater {
+                    setBusy(false)
                     notify(
                         buildString {
                             append("PR #${pr.id} approved.")
@@ -1579,6 +1569,7 @@ class PRToolWindowPanel(private val project: Project) : JPanel(BorderLayout()), 
                 }
             } catch (e: Exception) {
                 invokeLater {
+                    setBusy(false)
                     setStatus("Approve failed.")
                     Messages.showErrorDialog(
                         project,
@@ -1597,6 +1588,7 @@ class PRToolWindowPanel(private val project: Project) : JPanel(BorderLayout()), 
         if (Messages.showYesNoDialog(project, "$actionLabel PR #${pr.id}: \"${pr.title}\"?",
                 "Confirm $actionLabel", Messages.getWarningIcon()) != Messages.YES) return
         setStatus("${actionLabel}ing PR #${pr.id}…")
+        setBusy(true)
         runInBackground {
             try {
                 val summary = runCatching {
@@ -1608,6 +1600,7 @@ class PRToolWindowPanel(private val project: Project) : JPanel(BorderLayout()), 
                     jiraService.syncReviewOutcome(pr, ReviewOutcome.DECLINED, summary).userMessage()
                 }.getOrElse { "JIRA sync failed: ${it.message}" }
                 invokeLater {
+                    setBusy(false)
                     notify(
                         buildString {
                             append("PR #${pr.id} ${actionLabel.lowercase()}d.")
@@ -1619,6 +1612,7 @@ class PRToolWindowPanel(private val project: Project) : JPanel(BorderLayout()), 
                 }
             } catch (e: Exception) {
                 invokeLater {
+                    setBusy(false)
                     setStatus("$actionLabel failed.")
                     Messages.showErrorDialog(
                         project,
@@ -1648,6 +1642,7 @@ class PRToolWindowPanel(private val project: Project) : JPanel(BorderLayout()), 
                 Messages.getQuestionIcon()
             ) != Messages.YES) return
         setStatus("Merging PR #${pr.id}…")
+        setBusy(true)
         runInBackground {
             try {
                 service.mergePullRequest(info.owner, info.repoSlug, pr.id)
@@ -1655,6 +1650,7 @@ class PRToolWindowPanel(private val project: Project) : JPanel(BorderLayout()), 
                     jiraService.syncReviewOutcome(pr, ReviewOutcome.MERGED).userMessage()
                 }.getOrElse { "JIRA sync failed: ${it.message}" }
                 invokeLater {
+                    setBusy(false)
                     notify(
                         buildString {
                             append("PR #${pr.id} merged successfully.")
@@ -1666,6 +1662,7 @@ class PRToolWindowPanel(private val project: Project) : JPanel(BorderLayout()), 
                 }
             } catch (e: Exception) {
                 invokeLater {
+                    setBusy(false)
                     setStatus("Merge failed.")
                     Messages.showErrorDialog(
                         project,
@@ -1686,7 +1683,11 @@ class PRToolWindowPanel(private val project: Project) : JPanel(BorderLayout()), 
             "No Selection", JOptionPane.WARNING_MESSAGE); null
     }
 
-    private fun setStatus(msg: String)    { statusLabel.text = " $msg" }
+    private fun setStatus(msg: String) { statusLabel.text = msg }
+    private fun setBusy(busy: Boolean) {
+        spinner.isVisible = busy
+        if (busy) spinner.resume() else spinner.suspend()
+    }
 
     private fun notify(msg: String, type: NotificationType) {
         NotificationGroupManager.getInstance()

@@ -52,6 +52,7 @@ class PluginSettings : PersistentStateComponent<PluginSettings.State> {
         var jiraEmail: String           = ""
         var jiraApiToken: String        = ""
         var jiraIssueKeyPattern: String = ""
+        var welcomeShown: Boolean       = false
 
         // Bitbucket per-repo tokens stored as a list of Entry objects
         // so the XmlSerializer handles them without a Map (maps with
@@ -114,6 +115,10 @@ class PluginSettings : PersistentStateComponent<PluginSettings.State> {
     var systemPrompt: String
         get() = myState.systemPrompt
         set(v) { myState.systemPrompt = v; save() }
+
+    var welcomeShown: Boolean
+        get() = myState.welcomeShown
+        set(v) { myState.welcomeShown = v; save() }
 
     // ── GitHub PAT ────────────────────────────────────────────────────────────
     fun getGitHubPat(): String = myState.gitHubPat

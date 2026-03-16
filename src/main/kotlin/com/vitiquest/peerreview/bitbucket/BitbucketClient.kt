@@ -110,13 +110,9 @@ class BitbucketClient(internal val pat: String) {
      */
     fun postInlineComments(workspace: String, repoSlug: String, prId: Int, comments: List<InlineComment>) {
         val url = "$base/repositories/$workspace/$repoSlug/pullrequests/$prId/comments"
-        println("[PR Pilot] postInlineComments → ${comments.size} comment(s) to POST → $url")
 
         for ((index, ic) in comments.withIndex()) {
-            if (ic.file.isBlank() || ic.line <= 0) {
-                println("[PR Pilot] Skipping comment [$index]: blank file or invalid line (file='${ic.file}', line=${ic.line})")
-                continue
-            }
+            if (ic.file.isBlank() || ic.line <= 0) continue
 
             // Bitbucket Cloud inline comment payload.
             // "type" is a *response* discriminator — do NOT send it in the request body.
@@ -132,16 +128,7 @@ class BitbucketClient(internal val pat: String) {
                 )
             )
 
-            println("[PR Pilot] Inline comment [$index] REQUEST BODY:\n$payload")
-
-            val responseBody = try {
-                postRaw(url, payload)
-            } catch (e: IOException) {
-                println("[PR Pilot] Inline comment [$index] FAILED: ${e.message}")
-                throw e
-            }
-
-            println("[PR Pilot] Inline comment [$index] RESPONSE:\n$responseBody\n")
+            postRaw(url, payload)
         }
     }
 
@@ -209,7 +196,6 @@ class BitbucketClient(internal val pat: String) {
                     "[${request.method} ${request.url}]: ${bodyText.take(400)}"
                 )
             }
-            println("[PR Pilot] ${request.method} ${request.url} → HTTP ${response.code}")
             return bodyText
         }
     }
