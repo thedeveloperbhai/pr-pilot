@@ -2,6 +2,7 @@ package com.vitiquest.peerreview.bitbucket
 
 import com.fasterxml.jackson.module.kotlin.jacksonObjectMapper
 import com.fasterxml.jackson.module.kotlin.readValue
+import com.vitiquest.peerreview.ai.InlineComment
 import okhttp3.MediaType.Companion.toMediaType
 import okhttp3.OkHttpClient
 import okhttp3.Request
@@ -96,6 +97,74 @@ class BitbucketClient(internal val pat: String) {
         post("$base/repositories/$workspace/$repoSlug/pullrequests/$prId/comments", jsonBody)
     }
 
+    /**
+     * Posts each [InlineComment] as an individual inline comment anchored to the
+     * specified file and line number.
+     *
+     * Bitbucket Cloud API:
+     * POST /2.0/repositories/{workspace}/{repoSlug}/pullrequests/{prId}/comments
+     * {
+     *   "content": { "raw": "<text>" },
+     *   "inline":  { "to": <line>, "path": "<file>" }
+     * }
+     */
+    fun postInlineComments(workspace: String, repoSlug: String, prId: Int, comments: List<InlineComment>) {
+        val url = "$base/repositories/$workspace/$repoSlug/pullrequests/$prId/comments"
+        println("[PR Pilot] postInlineComments → ${comments.size} comment(s) to POST → $url")
+
+        for ((index, ic) in comments.withIndex()) {
+            if (ic.file.isBlank() || ic.line <= 0) {
+                println("[PR Pilot] Skipping comment [$index]: blank file or invalid line (file='${ic.file}', line=${ic.line})")
+                continue
+            }
+
+            // Bitbucket Cloud inline comment payload.
+            // "type" is a *response* discriminator — do NOT send it in the request body.
+            // "inline.from" and "inline.to" must both be present.
+            val payload = mapper.writeValueAsString(
+                mapOf(
+                    "content" to mapOf("raw" to ic.comment),
+                    "inline"  to mapOf(
+                        "from" to ic.line,
+                        "to"   to ic.line,
+                        "path" to ic.file
+                    )
+                )
+            )
+
+            println("[PR Pilot] Inline comment [$index] REQUEST BODY:\n$payload")
+
+            val responseBody = try {
+                postRaw(url, payload)
+            } catch (e: IOException) {
+                println("[PR Pilot] Inline comment [$index] FAILED: ${e.message}")
+                throw e
+            }
+
+            println("[PR Pilot] Inline comment [$index] RESPONSE:\n$responseBody\n")
+        }
+    }
+
+    /**
+     * Posts inline comments and then posts a top-level "Changes Requested" comment
+     * summarising the request.  Bitbucket Cloud does not have a first-class
+     * "request-changes" API in the free tier, so we approximate it with a comment.
+     *
+     * @param summaryBody  The overall AI review text to post as a top-level comment.
+     * @param comments     Inline per-line comments to attach.
+     */
+    fun requestChanges(
+        workspace: String,
+        repoSlug: String,
+        prId: Int,
+        summaryBody: String,
+        comments: List<InlineComment>
+    ) {
+        postInlineComments(workspace, repoSlug, prId, comments)
+        val header = "⚠️ **Changes Requested**\n\n"
+        postComment(workspace, repoSlug, prId, header + summaryBody)
+    }
+
     // -------------------------------------------------------------------------
     // HTTP helpers
     // -------------------------------------------------------------------------
@@ -121,6 +190,9 @@ class BitbucketClient(internal val pat: String) {
         return execute(request)
     }
 
+    /** Same as [post] but also used directly where we want to capture the raw response. */
+    private fun postRaw(url: String, jsonBody: String): String = post(url, jsonBody)
+
     private fun execute(request: Request): String {
         http.newCall(request).execute().use { response ->
             val bodyText = response.body?.string() ?: ""
@@ -137,6 +209,7 @@ class BitbucketClient(internal val pat: String) {
                     "[${request.method} ${request.url}]: ${bodyText.take(400)}"
                 )
             }
+            println("[PR Pilot] ${request.method} ${request.url} → HTTP ${response.code}")
             return bodyText
         }
     }

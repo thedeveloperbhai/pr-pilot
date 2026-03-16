@@ -1,5 +1,6 @@
 package com.vitiquest.peerreview.bitbucket
 
+import com.vitiquest.peerreview.ai.InlineComment
 import com.vitiquest.peerreview.github.GitHubClient
 import com.vitiquest.peerreview.settings.GitProvider
 import com.vitiquest.peerreview.settings.PluginSettings
@@ -69,4 +70,31 @@ class PullRequestService {
     fun postComment(owner: String, repo: String, prId: Int, body: String) =
         if (isGitHub) gitHubClient().postComment(owner, repo, prId, body)
         else          bitbucketClient(owner, repo).postComment(owner, repo, prId, body)
+
+    /**
+     * Posts individual inline comments (line-level) to the pull request.
+     * On GitHub these are attached via a COMMENT review.
+     * On Bitbucket each comment is posted with an inline anchor.
+     */
+    fun postInlineComments(owner: String, repo: String, prId: Int, comments: List<InlineComment>) {
+        if (comments.isEmpty()) return
+        if (isGitHub) {
+            gitHubClient().submitReview(owner, repo, prId, "COMMENT", "", comments)
+        } else {
+            bitbucketClient(owner, repo).postInlineComments(owner, repo, prId, comments)
+        }
+    }
+
+    /**
+     * Posts inline comments AND marks the PR as "Changes Requested".
+     * On GitHub a REQUEST_CHANGES review is submitted with the inline comments.
+     * On Bitbucket inline comments are posted plus a top-level "Changes Requested" comment.
+     */
+    fun requestChanges(owner: String, repo: String, prId: Int, body: String, comments: List<InlineComment>) {
+        if (isGitHub) {
+            gitHubClient().submitReview(owner, repo, prId, "REQUEST_CHANGES", body, comments)
+        } else {
+            bitbucketClient(owner, repo).requestChanges(owner, repo, prId, body, comments)
+        }
+    }
 }

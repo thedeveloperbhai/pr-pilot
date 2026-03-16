@@ -2,6 +2,7 @@ package com.vitiquest.peerreview.github
 
 import com.fasterxml.jackson.module.kotlin.jacksonObjectMapper
 import com.fasterxml.jackson.module.kotlin.readValue
+import com.vitiquest.peerreview.ai.InlineComment
 import com.vitiquest.peerreview.bitbucket.BitbucketClient
 import com.vitiquest.peerreview.bitbucket.DiffStatEntry
 import com.vitiquest.peerreview.bitbucket.PullRequest
@@ -126,6 +127,40 @@ class GitHubClient(private val pat: String) {
     fun postComment(owner: String, repo: String, prNumber: Int, commentBody: String) {
         val jsonBody = mapper.writeValueAsString(mapOf("body" to commentBody))
         post("$base/repos/$owner/$repo/issues/$prNumber/comments", jsonBody)
+    }
+
+    /**
+     * Submits a pull request review with optional inline comments.
+     *
+     * @param event  "APPROVE" | "REQUEST_CHANGES" | "COMMENT"
+     * @param body   Top-level review body (Markdown).
+     * @param inlineComments  Optional per-line comments to attach to the review.
+     */
+    fun submitReview(
+        owner: String,
+        repo: String,
+        prNumber: Int,
+        event: String,
+        body: String,
+        inlineComments: List<InlineComment> = emptyList()
+    ) {
+        val commentsJson = inlineComments
+            .filter { it.file.isNotBlank() && it.line > 0 }
+            .map { ic ->
+                mapOf(
+                    "path" to ic.file,
+                    "line" to ic.line,
+                    "side" to "RIGHT",
+                    "body" to ic.comment
+                )
+            }
+        val payload = buildMap<String, Any> {
+            put("event", event)
+            put("body", body)
+            if (commentsJson.isNotEmpty()) put("comments", commentsJson)
+        }
+        val jsonBody = mapper.writeValueAsString(payload)
+        post("$base/repos/$owner/$repo/pulls/$prNumber/reviews", jsonBody)
     }
 
     // ── HTTP helpers ──────────────────────────────────────────────────────────

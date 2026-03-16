@@ -1,5 +1,7 @@
 package com.vitiquest.peerreview.ui
 
+import com.fasterxml.jackson.module.kotlin.jacksonObjectMapper
+import com.fasterxml.jackson.module.kotlin.readValue
 import com.intellij.diff.DiffContentFactory
 import com.intellij.diff.DiffDialogHints
 import com.intellij.diff.DiffManager
@@ -20,6 +22,8 @@ import com.intellij.ui.components.JBList
 import com.intellij.ui.components.JBScrollPane
 import com.intellij.ui.components.JBTextField
 import com.intellij.util.ui.JBUI
+import com.vitiquest.peerreview.ai.AiReviewResult
+import com.vitiquest.peerreview.ai.InlineComment
 import com.vitiquest.peerreview.ai.OpenAIClient
 import com.vitiquest.peerreview.analysis.CodeAnalyzer
 import com.vitiquest.peerreview.bitbucket.PullRequest
@@ -69,8 +73,8 @@ class PRToolWindowPanel(private val project: Project) : JPanel(BorderLayout()), 
     // prId → number of changed files (populated when diff is fetched)
     private val prFileCount = mutableMapOf<Int, Int>()
 
-    // prId → cached AI summary markdown (avoids repeat API calls for the same PR)
-    private val aiSummaryCache = mutableMapOf<Int, String>()
+    // prId → cached AI review result (summary + inline comments) — avoids repeat API calls
+    private val aiSummaryCache = mutableMapOf<Int, AiReviewResult>()
 
     // filePath → open diff Window, so clicking the same file twice focuses instead of duplicating
     private val openDiffWindows = mutableMapOf<String, Window>()
@@ -694,11 +698,12 @@ class PRToolWindowPanel(private val project: Project) : JPanel(BorderLayout()), 
         setStatus("${if (forceRegenerate) "Regenerating" else "Building"} AI summary for PR #${pr.id}…")
         runInBackground {
             try {
-                val summary = buildAiSummaryText(pr, info)
+                val rawText = buildAiSummaryText(pr, info)
+                val result  = parseAiResponse(rawText)
                 invokeLater {
-                    aiSummaryCache[pr.id] = summary          // store in cache
-                    showSummaryDialog(pr, summary, info)
-                    setStatus("AI summary generated.")
+                    aiSummaryCache[pr.id] = result
+                    showSummaryDialog(pr, result, info)
+                    setStatus("AI summary generated (${result.inlineComments.size} inline comment(s)).")
                 }
             } catch (e: Exception) {
                 invokeLater {
@@ -707,6 +712,49 @@ class PRToolWindowPanel(private val project: Project) : JPanel(BorderLayout()), 
                 }
             }
         }
+    }
+
+    /**
+     * Parses the raw AI response text into an [AiReviewResult].
+     *
+     * The AI is instructed to append a JSON block delimited by
+     * <!-- INLINE_COMMENTS_START --> and <!-- INLINE_COMMENTS_END --> tags.
+     * Everything before the first delimiter is the Markdown summary.
+     */
+    private fun parseAiResponse(rawText: String): AiReviewResult {
+        val startTag = "<!-- INLINE_COMMENTS_START -->"
+        val endTag   = "<!-- INLINE_COMMENTS_END -->"
+
+        println("[PR Pilot] Raw AI response (${rawText.length} chars):\n${rawText.take(500)}…")
+
+        val startIdx = rawText.indexOf(startTag)
+        val endIdx   = rawText.indexOf(endTag)
+
+        println("[PR Pilot] parseAiResponse: startIdx=$startIdx endIdx=$endIdx")
+
+        if (startIdx == -1 || endIdx == -1 || endIdx <= startIdx) {
+            println("[PR Pilot] WARNING: Inline comments block not found in AI response. Returning summary-only.")
+            return AiReviewResult.ofSummaryOnly(rawText.trim())
+        }
+
+        val summary  = rawText.substring(0, startIdx).trim()
+        // Strip any accidental markdown code fence the model may have added
+        val rawJson  = rawText.substring(startIdx + startTag.length, endIdx).trim()
+            .removePrefix("```json").removePrefix("```").removeSuffix("```").trim()
+
+        println("[PR Pilot] Inline JSON to parse:\n$rawJson")
+
+        val inlineComments = try {
+            val mapper = jacksonObjectMapper()
+            val parsed = mapper.readValue<List<InlineComment>>(rawJson)
+            println("[PR Pilot] Parsed ${parsed.size} inline comment(s).")
+            parsed
+        } catch (e: Exception) {
+            println("[PR Pilot] ERROR parsing inline comments JSON: ${e.message}")
+            emptyList()
+        }
+
+        return AiReviewResult(summary, inlineComments)
     }
 
     private fun buildAiSummaryText(pr: PullRequest, info: RepoInfo): String {
@@ -765,7 +813,10 @@ class PRToolWindowPanel(private val project: Project) : JPanel(BorderLayout()), 
     }
 
     private fun getOrBuildAiSummary(pr: PullRequest, info: RepoInfo): String {
-        return aiSummaryCache[pr.id] ?: buildAiSummaryText(pr, info).also { aiSummaryCache[pr.id] = it }
+        return aiSummaryCache[pr.id]?.summary
+            ?: parseAiResponse(buildAiSummaryText(pr, info))
+                .also { aiSummaryCache[pr.id] = it }
+                .summary
     }
 
     /**
@@ -857,40 +908,48 @@ class PRToolWindowPanel(private val project: Project) : JPanel(BorderLayout()), 
         }.trimIndent()
     }
 
-    private fun showSummaryDialog(pr: PullRequest, summary: String, info: RepoInfo) {
-        val html = markdownToHtml(summary)
+    private fun showSummaryDialog(pr: PullRequest, result: AiReviewResult, info: RepoInfo) {
+        val summary  = result.summary
+        val comments = result.inlineComments
 
         // ── Theme colours ─────────────────────────────────────────────────────
-        val uiFont  = com.intellij.util.ui.UIUtil.getLabelFont()
-        val bgColor = com.intellij.util.ui.UIUtil.getPanelBackground()
-        val fgColor = com.intellij.util.ui.UIUtil.getLabelForeground()
-        val isDark  = !JBColor.isBright()
-        val codeBg  = if (isDark) "#2B2B2B" else "#F5F5F5"
-        val fg      = "#${fgColor.toHex()}"
-        val bg      = "#${bgColor.toHex()}"
-        val fontPt  = uiFont.size
-        val fontFam = uiFont.family
+        val uiFont   = com.intellij.util.ui.UIUtil.getLabelFont()
+        val bgColor  = com.intellij.util.ui.UIUtil.getPanelBackground()
+        val fgColor  = com.intellij.util.ui.UIUtil.getLabelForeground()
+        val isDark   = !JBColor.isBright()
 
-        // Build a stylesheet using ONLY CSS1/CSS2 properties Swing HTMLEditorKit understands.
+        // Slightly elevated card bg (lighter in light theme, slightly brighter in dark)
+        val cardBg   = if (isDark) JBColor(Color(0x3C3F41), Color(0x3C3F41))
+                       else        JBColor(Color(0xFFFFFF), Color(0xFFFFFF))
+
+        val codeBg   = if (isDark) "#2B2B2B" else "#F5F5F5"
+        val fg       = "#${fgColor.toHex()}"
+        val bg       = "#${bgColor.toHex()}"
+        val fontPt   = uiFont.size
+        val fontFam  = uiFont.family
+
+        // ── CSS for HTMLEditorKit ─────────────────────────────────────────────
         val css = buildString {
-            append("body { font-family: $fontFam; font-size: ${fontPt}pt; color: $fg; background-color: $bg; }")
-            append("h1 { font-size: ${(fontPt * 1.8).toInt()}pt; color: $fg; }")
-            append("h2 { font-size: ${(fontPt * 1.4).toInt()}pt; color: $fg; margin-top: 14px; }")
-            append("h3 { font-size: ${(fontPt * 1.1).toInt()}pt; color: $fg; margin-top: 10px; }")
-            append("p  { margin-top: 4px; margin-bottom: 4px; }")
-            append("code { font-family: monospace; font-size: ${fontPt - 1}pt; background-color: $codeBg; color: $fg; }")
-            append("pre  { font-family: monospace; font-size: ${fontPt - 1}pt; background-color: $codeBg; color: $fg; margin-top: 6px; margin-bottom: 6px; }")
-            append("table { }")
-            append("th { font-weight: bold; background-color: $codeBg; color: $fg; padding-top: 4px; padding-bottom: 4px; padding-left: 8px; padding-right: 8px; }")
-            append("td { color: $fg; padding-top: 3px; padding-bottom: 3px; padding-left: 8px; padding-right: 8px; }")
-            append("ul { margin-left: 20px; }")
-            append("ol { margin-left: 20px; }")
-            append("li { margin-bottom: 2px; }")
+            append("body { font-family: $fontFam; font-size: ${fontPt}pt; color: $fg; background-color: $bg; margin: 16px 20px; }")
+            append("h1 { font-size: ${(fontPt * 1.7).toInt()}pt; color: $fg; margin-top: 0px; margin-bottom: 8px; }")
+            append("h2 { font-size: ${(fontPt * 1.35).toInt()}pt; color: $fg; margin-top: 18px; margin-bottom: 4px; border-bottom: 1px solid #888; padding-bottom: 2px; }")
+            append("h3 { font-size: ${(fontPt * 1.1).toInt()}pt; color: $fg; margin-top: 12px; margin-bottom: 2px; }")
+            append("p  { margin-top: 5px; margin-bottom: 5px; line-height: 1.5; }")
+            append("code { font-family: monospace; font-size: ${fontPt - 1}pt; background-color: $codeBg; color: $fg; padding-left: 3px; padding-right: 3px; }")
+            append("pre  { font-family: monospace; font-size: ${fontPt - 1}pt; background-color: $codeBg; color: $fg; padding: 10px; margin-top: 8px; margin-bottom: 8px; }")
+            append("table { border-collapse: collapse; width: 100%; margin-top: 10px; margin-bottom: 10px; }")
+            append("th { font-weight: bold; background-color: $codeBg; color: $fg; padding: 6px 10px; border: 1px solid #555; }")
+            append("td { color: $fg; padding: 5px 10px; border: 1px solid #555; }")
+            append("ul { margin-left: 22px; margin-top: 4px; margin-bottom: 4px; }")
+            append("ol { margin-left: 22px; margin-top: 4px; margin-bottom: 4px; }")
+            append("li { margin-bottom: 3px; line-height: 1.5; }")
             append("strong { font-weight: bold; }")
             append("em { font-style: italic; }")
-            append("blockquote { color: #888888; margin-left: 16px; }")
+            append("blockquote { color: #888888; margin-left: 16px; border-left: 3px solid #888; padding-left: 8px; }")
+            append("hr { border: none; border-top: 1px solid #555; margin-top: 12px; margin-bottom: 12px; }")
         }
 
+        // ── Tab 1: Summary ────────────────────────────────────────────────────
         val kit = javax.swing.text.html.HTMLEditorKit()
         kit.styleSheet.addRule(css)
         val doc = kit.createDefaultDocument() as javax.swing.text.html.HTMLDocument
@@ -900,24 +959,238 @@ class PRToolWindowPanel(private val project: Project) : JPanel(BorderLayout()), 
             document   = doc
             isEditable = false
             background = bgColor
+            border     = JBUI.Borders.empty()
         }
-        textPane.text = "<html><body>$html</body></html>"
+        textPane.text = "<html><body>${markdownToHtml(summary)}</body></html>"
         textPane.caretPosition = 0
 
-        val scroll = JBScrollPane(textPane).apply {
-            preferredSize             = Dimension(960, 700)
+        val summaryScroll = JBScrollPane(textPane).apply {
             verticalScrollBarPolicy   = JScrollPane.VERTICAL_SCROLLBAR_AS_NEEDED
             horizontalScrollBarPolicy = JScrollPane.HORIZONTAL_SCROLLBAR_NEVER
+            border = null
         }
+
+        // ── Tab 2: Inline Comments ─────────────────────────────────────────────
+        val commentCheckboxes = mutableListOf<JCheckBox>()
+        val commentTextAreas  = mutableListOf<JTextArea>()
+
+        // Wrappers panel scrolls vertically; each card is a styled rounded box
+        val inlinePanel = JPanel().apply {
+            layout     = BoxLayout(this, BoxLayout.Y_AXIS)
+            background = bgColor
+            border     = JBUI.Borders.empty(12, 16, 12, 16)
+        }
+
+        if (comments.isEmpty()) {
+            val emptyBox = JPanel(BorderLayout()).apply {
+                isOpaque = false
+                border   = JBUI.Borders.empty(40, 0)
+            }
+            val emptyLbl = JBLabel("✅  No inline comments — the AI found no specific line-level issues.").apply {
+                foreground          = JBColor.GRAY
+                font                = Font(font.family, Font.ITALIC, fontPt)
+                horizontalAlignment = SwingConstants.CENTER
+            }
+            emptyBox.add(emptyLbl, BorderLayout.CENTER)
+            inlinePanel.add(emptyBox)
+        } else {
+            for ((idx, ic) in comments.withIndex()) {
+                val (sevLabel, sevColor, sevBg, accentColor) = when (ic.severity.lowercase()) {
+                    "critical" -> arrayOf(
+                        "🔴  CRITICAL",
+                        JBColor(Color(0xC0392B), Color(0xFF6B6B)),
+                        JBColor(Color(0xFFF0EE), Color(0x3D1A1A)),
+                        Color(0xC0392B)
+                    )
+                    "warning"  -> arrayOf(
+                        "🟡  WARNING",
+                        JBColor(Color(0xB45309), Color(0xF5C518)),
+                        JBColor(Color(0xFFFBEB), Color(0x2E2000)),
+                        Color(0xB45309)
+                    )
+                    else       -> arrayOf(
+                        "🟢  SUGGESTION",
+                        JBColor(Color(0x166534), Color(0x4CAF50)),
+                        JBColor(Color(0xF0FFF4), Color(0x0D2E18)),
+                        Color(0x166534)
+                    )
+                }
+
+                @Suppress("UNCHECKED_CAST")
+                val sevLabelStr  = sevLabel as JBColor
+                @Suppress("UNCHECKED_CAST")
+                val sevColorVal  = sevColor as JBColor
+                @Suppress("UNCHECKED_CAST")
+                val sevBgVal     = sevBg as JBColor
+                @Suppress("UNCHECKED_CAST")
+                val accentVal    = accentColor as Color
+
+                // ── Severity pill ──────────────────────────────────────────────
+                val sevPill = object : JLabel(when (ic.severity.lowercase()) {
+                    "critical"   -> "🔴  CRITICAL"
+                    "warning"    -> "🟡  WARNING"
+                    else         -> "🟢  SUGGESTION"
+                }) {
+                    init {
+                        font       = Font(font.family, Font.BOLD, fontPt - 2)
+                        foreground = when (ic.severity.lowercase()) {
+                            "critical" -> JBColor(Color(0xC0392B), Color(0xFF6B6B))
+                            "warning"  -> JBColor(Color(0xB45309), Color(0xF5C518))
+                            else       -> JBColor(Color(0x166534), Color(0x4CAF50))
+                        }
+                        border     = JBUI.Borders.empty(2, 8, 2, 8)
+                        isOpaque   = false
+                    }
+                    override fun paintComponent(g: Graphics) {
+                        val g2 = g as Graphics2D
+                        g2.setRenderingHint(RenderingHints.KEY_ANTIALIASING, RenderingHints.VALUE_ANTIALIAS_ON)
+                        val pillBg = when (ic.severity.lowercase()) {
+                            "critical" -> JBColor(Color(0xFFF0EE), Color(0x3D1A1A))
+                            "warning"  -> JBColor(Color(0xFFFBEB), Color(0x2E2000))
+                            else       -> JBColor(Color(0xF0FFF4), Color(0x0D2E18))
+                        }
+                        g2.color = pillBg
+                        g2.fillRoundRect(0, 0, width, height, 10, 10)
+                        super.paintComponent(g)
+                    }
+                }
+
+                // ── File + line badge ──────────────────────────────────────────
+                val fileName = ic.file.substringAfterLast('/')
+                val fileLabel = JBLabel(ic.file).apply {
+                    font       = Font(Font.MONOSPACED, Font.PLAIN, fontPt - 1)
+                    foreground = fgColor
+                }
+                val lineBadge = object : JLabel("  :${ic.line}  ") {
+                    init {
+                        font       = Font(Font.MONOSPACED, Font.BOLD, fontPt - 2)
+                        foreground = JBColor(Color(0x0550AE), Color(0x58A6FF))
+                        border     = JBUI.Borders.empty(1, 4)
+                        isOpaque   = false
+                    }
+                    override fun paintComponent(g: Graphics) {
+                        val g2 = g as Graphics2D
+                        g2.setRenderingHint(RenderingHints.KEY_ANTIALIASING, RenderingHints.VALUE_ANTIALIAS_ON)
+                        g2.color = JBColor(Color(0xDEF0FF), Color(0x0D2847))
+                        g2.fillRoundRect(0, 0, width, height, 8, 8)
+                        super.paintComponent(g)
+                    }
+                }
+
+                // ── Checkbox with "include in post" tooltip ────────────────────
+                val checkbox = JCheckBox("Post this comment").apply {
+                    isSelected = true
+                    background = cardBg
+                    font       = Font(font.family, Font.PLAIN, fontPt - 2)
+                    foreground = JBColor.GRAY
+                    toolTipText = "Uncheck to exclude from posting"
+                }
+                commentCheckboxes.add(checkbox)
+
+                // ── Editable comment text ──────────────────────────────────────
+                val textArea = JTextArea(ic.comment).apply {
+                    lineWrap      = true
+                    wrapStyleWord = true
+                    background    = if (isDark) Color(0x2B2B2B) else Color(0xF8F8F8)
+                    foreground    = fgColor
+                    font          = Font(font.family, Font.PLAIN, fontPt)
+                    border        = JBUI.Borders.empty(8, 10, 8, 10)
+                    rows          = 3
+                }
+                commentTextAreas.add(textArea)
+
+                val textAreaScroll = JBScrollPane(textArea).apply {
+                    verticalScrollBarPolicy   = JScrollPane.VERTICAL_SCROLLBAR_AS_NEEDED
+                    horizontalScrollBarPolicy = JScrollPane.HORIZONTAL_SCROLLBAR_NEVER
+                    border = javax.swing.border.LineBorder(JBColor.border(), 1, true)
+                }
+
+                // ── File/line row ──────────────────────────────────────────────
+                val fileRow = JPanel(FlowLayout(FlowLayout.LEFT, 4, 0)).apply {
+                    isOpaque = false
+                    add(fileLabel)
+                    add(lineBadge)
+                }
+
+                // ── Header row: severity pill left, checkbox right ─────────────
+                val headerRow = JPanel(BorderLayout(8, 0)).apply {
+                    isOpaque = false
+                    add(sevPill, BorderLayout.WEST)
+                    add(checkbox, BorderLayout.EAST)
+                }
+
+                // ── Card inner content ─────────────────────────────────────────
+                val innerContent = JPanel(BorderLayout(0, 6)).apply {
+                    isOpaque = false
+                    border   = JBUI.Borders.empty(10, 14, 12, 14)
+                    add(headerRow,     BorderLayout.NORTH)
+                    add(fileRow,       BorderLayout.CENTER)
+                }
+
+                val cardContent = JPanel(BorderLayout(0, 6)).apply {
+                    isOpaque = false
+                    add(innerContent, BorderLayout.NORTH)
+                    add(JPanel(BorderLayout()).apply {
+                        isOpaque = false
+                        border   = JBUI.Borders.empty(0, 14, 12, 14)
+                        add(textAreaScroll, BorderLayout.CENTER)
+                    }, BorderLayout.CENTER)
+                }
+
+                // ── Card with colored left accent border + rounded feel ─────────
+                val accentColorForSev = when (ic.severity.lowercase()) {
+                    "critical" -> JBColor(Color(0xC0392B), Color(0xFF6B6B))
+                    "warning"  -> JBColor(Color(0xD97706), Color(0xF5C518))
+                    else       -> JBColor(Color(0x16A34A), Color(0x4CAF50))
+                }
+
+                val card = object : JPanel(BorderLayout()) {
+                    override fun paintComponent(g: Graphics) {
+                        val g2 = g as Graphics2D
+                        g2.setRenderingHint(RenderingHints.KEY_ANTIALIASING, RenderingHints.VALUE_ANTIALIAS_ON)
+                        // Card background
+                        g2.color = cardBg
+                        g2.fillRoundRect(0, 0, width, height, 8, 8)
+                        // Left accent bar (4 px wide, same height, rounded on left side)
+                        g2.color = accentColorForSev
+                        g2.fillRoundRect(0, 0, 4, height, 4, 4)
+                    }
+                }.apply {
+                    isOpaque = false
+                    border   = JBUI.Borders.empty(0, 0, 12, 0)  // gap between cards
+                    add(cardContent, BorderLayout.CENTER)
+                    maximumSize = Dimension(Int.MAX_VALUE, preferredSize.height)
+                }
+
+                inlinePanel.add(card)
+                inlinePanel.add(Box.createVerticalStrut(4))
+            }
+        }
+
+        val inlineScroll = JBScrollPane(inlinePanel).apply {
+            verticalScrollBarPolicy   = JScrollPane.VERTICAL_SCROLLBAR_AS_NEEDED
+            horizontalScrollBarPolicy = JScrollPane.HORIZONTAL_SCROLLBAR_NEVER
+            border = null
+            background = bgColor
+        }
+
+        // ── Tabs ──────────────────────────────────────────────────────────────
+        val countLabel = if (comments.isEmpty()) "Inline Comments" else "Inline Comments  (${comments.size})"
+        val tabbedPane = javax.swing.JTabbedPane().apply {
+            addTab("📋  Summary",       summaryScroll)
+            addTab("💬  $countLabel",   inlineScroll)
+            background = bgColor
+            font       = Font(font.family, Font.PLAIN, fontPt)
+        }
+        tabbedPane.preferredSize = Dimension(1020, 700)
 
         // ── Bottom action bar ─────────────────────────────────────────────────
         val isGH         = info.provider == com.vitiquest.peerreview.settings.GitProvider.GITHUB
         val isOpen       = pr.state.uppercase() == "OPEN"
         val declineLabel = if (isGH) "Close PR" else "Decline PR"
 
-        // Left side: Regenerate + Copy
         val regenBtn = JButton(AllIcons.Actions.Refresh).apply {
-            toolTipText = "Regenerate AI summary (clears cache)"
+            toolTipText         = "Regenerate AI summary (clears cache)"
             isBorderPainted     = false
             isContentAreaFilled = false
             preferredSize       = Dimension(28, 28)
@@ -926,10 +1199,21 @@ class PRToolWindowPanel(private val project: Project) : JPanel(BorderLayout()), 
             font = Font(font.family, Font.PLAIN, 11)
         }
 
-        // Right side: action buttons (only shown when PR is open)
+        val postInlineBtn = JButton("💬  Post Inline Comments").apply {
+            font        = Font(font.family, Font.BOLD, 12)
+            foreground  = JBColor(Color(0x0550AE), Color(0x58A6FF))
+            isVisible   = isOpen && comments.isNotEmpty()
+            toolTipText = "Post checked inline comments to PR #${pr.id}"
+        }
+        val reqChangesBtn = JButton("🔁  Request Changes").apply {
+            font        = Font(font.family, Font.BOLD, 12)
+            foreground  = JBColor(Color(0xD97706), Color(0xF5C518))
+            isVisible   = isOpen
+            toolTipText = "Post inline comments and request changes from the PR author"
+        }
         val approveBtn = JButton("✅  Approve").apply {
             font        = Font(font.family, Font.BOLD, 12)
-            foreground  = JBColor(Color(0x166534), Color(0x3FB950))
+            foreground  = JBColor(Color(0x16A34A), Color(0x4CAF50))
             isVisible   = isOpen
             toolTipText = "Post AI summary as comment, then approve this PR"
         }
@@ -949,25 +1233,28 @@ class PRToolWindowPanel(private val project: Project) : JPanel(BorderLayout()), 
             font = Font(font.family, Font.PLAIN, 12)
         }
 
-        val leftBar = JPanel(FlowLayout(FlowLayout.LEFT, 4, 4)).apply {
+        val leftBar = JPanel(FlowLayout(FlowLayout.LEFT, 4, 6)).apply {
             isOpaque = false
             add(regenBtn)
             add(copyBtn)
         }
-        val rightBar = JPanel(FlowLayout(FlowLayout.RIGHT, 6, 4)).apply {
+        val rightBar = JPanel(FlowLayout(FlowLayout.RIGHT, 6, 6)).apply {
             isOpaque = false
             if (isOpen) {
+                if (comments.isNotEmpty()) add(postInlineBtn)
+                add(reqChangesBtn)
+                add(JSeparator(JSeparator.VERTICAL).apply { preferredSize = Dimension(1, 26) })
                 add(approveBtn)
                 add(mergeBtn)
                 add(declineBtn)
-                add(JSeparator(JSeparator.VERTICAL).apply { preferredSize = Dimension(1, 24) })
+                add(JSeparator(JSeparator.VERTICAL).apply { preferredSize = Dimension(1, 26) })
             }
             add(closeDialogBtn)
         }
 
         val southBar = JPanel(BorderLayout()).apply {
-            border   = javax.swing.border.MatteBorder(1, 0, 0, 0, JBColor.border())
-            isOpaque = true
+            border     = javax.swing.border.MatteBorder(1, 0, 0, 0, JBColor.border())
+            isOpaque   = true
             background = bgColor
             add(leftBar,  BorderLayout.WEST)
             add(rightBar, BorderLayout.EAST)
@@ -976,18 +1263,27 @@ class PRToolWindowPanel(private val project: Project) : JPanel(BorderLayout()), 
         // ── Dialog ────────────────────────────────────────────────────────────
         val dialog = JDialog(
             SwingUtilities.getWindowAncestor(this),
-            "AI Summary — PR #${pr.id}: ${pr.title}",
+            "🤖  AI Review — PR #${pr.id}: ${pr.title}",
             java.awt.Dialog.ModalityType.APPLICATION_MODAL
         ).apply {
             contentPane = JPanel(BorderLayout()).apply {
-                add(scroll,   BorderLayout.CENTER)
-                add(southBar, BorderLayout.SOUTH)
+                add(tabbedPane, BorderLayout.CENTER)
+                add(southBar,   BorderLayout.SOUTH)
             }
             pack()
             setLocationRelativeTo(this@PRToolWindowPanel)
-            minimumSize = Dimension(700, 500)
+            minimumSize = Dimension(780, 540)
             isResizable  = true
         }
+
+        // ── Helper: collect selected (possibly edited) inline comments ─────────
+        fun selectedInlineComments(): List<InlineComment> = comments.indices
+            .filter { i -> commentCheckboxes.getOrNull(i)?.isSelected == true }
+            .map { i ->
+                val original   = comments[i]
+                val editedText = commentTextAreas.getOrNull(i)?.text?.trim() ?: original.comment
+                original.copy(comment = editedText.ifBlank { original.comment })
+            }
 
         // ── Wire button actions ───────────────────────────────────────────────
 
@@ -1004,10 +1300,70 @@ class PRToolWindowPanel(private val project: Project) : JPanel(BorderLayout()), 
 
         closeDialogBtn.addActionListener { dialog.dispose() }
 
-        /**
-         * Asks whether to post the summary as a comment, then executes [action].
-         * Closes the dialog after the action completes.
-         */
+        postInlineBtn.addActionListener {
+            val selected = selectedInlineComments()
+            if (selected.isEmpty()) {
+                JOptionPane.showMessageDialog(dialog, "No inline comments selected. Check at least one comment.", "Nothing to Post", JOptionPane.INFORMATION_MESSAGE)
+                return@addActionListener
+            }
+            val ok = JOptionPane.showConfirmDialog(
+                dialog,
+                "Post ${selected.size} inline comment(s) on PR #${pr.id}?",
+                "Confirm Post",
+                JOptionPane.OK_CANCEL_OPTION
+            )
+            if (ok != JOptionPane.OK_OPTION) return@addActionListener
+            dialog.dispose()
+            setStatus("Posting ${selected.size} inline comment(s) on PR #${pr.id}…")
+            runInBackground {
+                try {
+                    service.postInlineComments(info.owner, info.repoSlug, pr.id, selected)
+                    invokeLater {
+                        notify("Posted ${selected.size} inline comment(s) on PR #${pr.id}.", NotificationType.INFORMATION)
+                        setStatus("Inline comments posted.")
+                    }
+                } catch (e: Exception) {
+                    invokeLater {
+                        setStatus("Failed to post inline comments.")
+                        Messages.showErrorDialog(project, e.message ?: "Unknown error", "Post Inline Comments Failed")
+                    }
+                }
+            }
+        }
+
+        reqChangesBtn.addActionListener {
+            val selected = selectedInlineComments()
+            val confirmMsg = buildString {
+                append("Request changes on PR #${pr.id}?")
+                if (selected.isNotEmpty()) append("\n\nThis will post ${selected.size} inline comment(s) and\nmark the PR as 'Changes Requested'.")
+                else append("\n\nNo inline comments are selected — only a top-level 'Changes Requested' comment will be posted.")
+            }
+            val ok = JOptionPane.showConfirmDialog(dialog, confirmMsg, "Confirm Request Changes", JOptionPane.OK_CANCEL_OPTION, JOptionPane.WARNING_MESSAGE)
+            if (ok != JOptionPane.OK_OPTION) return@addActionListener
+            dialog.dispose()
+            setStatus("Requesting changes on PR #${pr.id}…")
+            runInBackground {
+                try {
+                    service.requestChanges(info.owner, info.repoSlug, pr.id, summary, selected)
+                    val jiraMessage = runCatching {
+                        jiraService.syncReviewOutcome(pr, ReviewOutcome.DECLINED, summary).userMessage()
+                    }.getOrElse { "JIRA sync failed: ${it.message}" }
+                    invokeLater {
+                        notify(buildString {
+                            append("Changes requested on PR #${pr.id}.")
+                            if (!jiraMessage.isNullOrBlank()) append(" $jiraMessage")
+                        }, NotificationType.WARNING)
+                        loadPullRequests()
+                    }
+                } catch (e: Exception) {
+                    invokeLater {
+                        setStatus("Request changes failed.")
+                        Messages.showErrorDialog(project, e.message ?: "Unknown error", "Request Changes Failed")
+                    }
+                }
+            }
+        }
+
         fun executeWithOptionalComment(actionLabel: String, reviewOutcome: ReviewOutcome, action: () -> Unit) {
             val choice = JOptionPane.showOptionDialog(
                 dialog,
@@ -1016,34 +1372,29 @@ class PRToolWindowPanel(private val project: Project) : JPanel(BorderLayout()), 
                 JOptionPane.YES_NO_CANCEL_OPTION,
                 JOptionPane.QUESTION_MESSAGE,
                 null,
-                arrayOf("Post & $actionLabel", actionLabel + " only", "Cancel"),
+                arrayOf("Post & $actionLabel", "$actionLabel only", "Cancel"),
                 "Post & $actionLabel"
             )
-            if (choice == 2 || choice == JOptionPane.CLOSED_OPTION) return  // cancelled
+            if (choice == 2 || choice == JOptionPane.CLOSED_OPTION) return
 
             dialog.dispose()
             setStatus("${actionLabel}ing PR #${pr.id}…")
             runInBackground {
                 try {
-                    if (choice == 0) {   // "Post & <action>"
-                        service.postComment(info.owner, info.repoSlug, pr.id, summary)
-                    }
+                    if (choice == 0) service.postComment(info.owner, info.repoSlug, pr.id, summary)
                     action()
                     val jiraMessage = runCatching {
                         jiraService.syncReviewOutcome(
-                            pr = pr,
+                            pr      = pr,
                             outcome = reviewOutcome,
                             summary = if (reviewOutcome == ReviewOutcome.DECLINED) summary else null
                         ).userMessage()
                     }.getOrElse { "JIRA sync failed: ${it.message}" }
                     invokeLater {
-                        notify(
-                            buildString {
-                                append("PR #${pr.id} ${actionLabel.lowercase()}d.")
-                                if (!jiraMessage.isNullOrBlank()) append(" $jiraMessage")
-                            },
-                            NotificationType.INFORMATION
-                        )
+                        notify(buildString {
+                            append("PR #${pr.id} ${actionLabel.lowercase()}d.")
+                            if (!jiraMessage.isNullOrBlank()) append(" $jiraMessage")
+                        }, NotificationType.INFORMATION)
                         loadPullRequests()
                     }
                 } catch (e: Exception) {
@@ -1056,7 +1407,7 @@ class PRToolWindowPanel(private val project: Project) : JPanel(BorderLayout()), 
         }
 
         approveBtn.addActionListener  { executeWithOptionalComment("Approve", ReviewOutcome.APPROVED)  { service.approvePullRequest(info.owner, info.repoSlug, pr.id) } }
-        mergeBtn.addActionListener    { executeWithOptionalComment("Merge", ReviewOutcome.MERGED)    { service.mergePullRequest(info.owner, info.repoSlug, pr.id) } }
+        mergeBtn.addActionListener    { executeWithOptionalComment("Merge",   ReviewOutcome.MERGED)    { service.mergePullRequest(info.owner, info.repoSlug, pr.id) } }
         declineBtn.addActionListener  { executeWithOptionalComment(if (isGH) "Close" else "Decline", ReviewOutcome.DECLINED) { service.declinePullRequest(info.owner, info.repoSlug, pr.id) } }
 
         dialog.isVisible = true
