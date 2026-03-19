@@ -1,0 +1,270 @@
+{
+  "name": "pr-pilot",
+  "displayName": "PR Pilot",
+  "description": "Review GitHub and Bitbucket Cloud Pull Requests from within VS Code with AI-powered code review",
+  "version": "1.0.0",
+  "publisher": "vitiquest",
+  "engines": {
+    "vscode": "^1.85.0"
+  },
+  "categories": [
+    "Other"
+  ],
+  "keywords": [
+    "pull request",
+    "code review",
+    "github",
+    "bitbucket",
+    "ai review",
+    "jira"
+  ],
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/vitiquest/pr-pilot"
+  },
+  "activationEvents": [
+    "onStartupFinished"
+  ],
+  "main": "./out/extension.js",
+  "contributes": {
+    "viewsContainers": {
+      "activitybar": [
+        {
+          "id": "prPilot",
+          "title": "PR Pilot",
+          "icon": "resources/icons/pr-pilot.svg"
+        }
+      ]
+    },
+    "views": {
+      "prPilot": [
+        {
+          "id": "prPilotPRList",
+          "name": "Pull Requests",
+          "icon": "resources/icons/pr-pilot.svg"
+        },
+        {
+          "id": "prPilotFileList",
+          "name": "Files Changed",
+          "icon": "resources/icons/pr-pilot.svg",
+          "visibility": "collapsed"
+        }
+      ]
+    },
+    "commands": [
+      {
+        "command": "prPilot.refresh",
+        "title": "Refresh",
+        "icon": "$(refresh)",
+        "category": "PR Pilot"
+      },
+      {
+        "command": "prPilot.filterState",
+        "title": "Filter by State",
+        "icon": "$(filter)",
+        "category": "PR Pilot"
+      },
+      {
+        "command": "prPilot.viewFiles",
+        "title": "View Files",
+        "icon": "$(file-code)",
+        "category": "PR Pilot"
+      },
+      {
+        "command": "prPilot.generateAiReview",
+        "title": "Generate AI Review",
+        "icon": "$(sparkle)",
+        "category": "PR Pilot"
+      },
+      {
+        "command": "prPilot.approvePR",
+        "title": "Approve PR",
+        "icon": "$(check)",
+        "category": "PR Pilot"
+      },
+      {
+        "command": "prPilot.mergePR",
+        "title": "Merge PR",
+        "icon": "$(git-merge)",
+        "category": "PR Pilot"
+      },
+      {
+        "command": "prPilot.declinePR",
+        "title": "Decline / Close PR",
+        "icon": "$(close)",
+        "category": "PR Pilot"
+      },
+      {
+        "command": "prPilot.openDiff",
+        "title": "Open Diff",
+        "icon": "$(diff)",
+        "category": "PR Pilot"
+      },
+      {
+        "command": "prPilot.openSettings",
+        "title": "Open Settings",
+        "icon": "$(settings-gear)",
+        "category": "PR Pilot"
+      },
+      {
+        "command": "prPilot.postComment",
+        "title": "Post Comment",
+        "icon": "$(comment)",
+        "category": "PR Pilot"
+      }
+    ],
+    "menus": {
+      "view/title": [
+        {
+          "command": "prPilot.refresh",
+          "when": "view == prPilotPRList",
+          "group": "navigation@1"
+        },
+        {
+          "command": "prPilot.filterState",
+          "when": "view == prPilotPRList",
+          "group": "navigation@2"
+        },
+        {
+          "command": "prPilot.openSettings",
+          "when": "view == prPilotPRList",
+          "group": "navigation@3"
+        }
+      ],
+      "view/item/context": [
+        {
+          "command": "prPilot.viewFiles",
+          "when": "view == prPilotPRList && viewItem == pullRequest",
+          "group": "inline@1"
+        },
+        {
+          "command": "prPilot.generateAiReview",
+          "when": "view == prPilotPRList && viewItem == pullRequest",
+          "group": "inline@2"
+        },
+        {
+          "command": "prPilot.viewFiles",
+          "when": "view == prPilotPRList && viewItem == pullRequest",
+          "group": "prActions@1"
+        },
+        {
+          "command": "prPilot.generateAiReview",
+          "when": "view == prPilotPRList && viewItem == pullRequest",
+          "group": "prActions@2"
+        },
+        {
+          "command": "prPilot.approvePR",
+          "when": "view == prPilotPRList && viewItem == pullRequest",
+          "group": "prActions@3"
+        },
+        {
+          "command": "prPilot.mergePR",
+          "when": "view == prPilotPRList && viewItem == pullRequest",
+          "group": "prActions@4"
+        },
+        {
+          "command": "prPilot.declinePR",
+          "when": "view == prPilotPRList && viewItem == pullRequest",
+          "group": "prActions@5"
+        },
+        {
+          "command": "prPilot.openDiff",
+          "when": "view == prPilotFileList && viewItem == diffFile",
+          "group": "inline@1"
+        }
+      ]
+    },
+    "configuration": {
+      "title": "PR Pilot",
+      "properties": {
+        "prPilot.gitProvider": {
+          "type": "string",
+          "enum": [
+            "BITBUCKET",
+            "GITHUB"
+          ],
+          "enumDescriptions": [
+            "Bitbucket Cloud",
+            "GitHub"
+          ],
+          "default": "BITBUCKET",
+          "description": "Git provider (Bitbucket Cloud or GitHub)"
+        },
+        "prPilot.aiProvider": {
+          "type": "string",
+          "enum": [
+            "OPENAI",
+            "OPENAI_COMPATIBLE",
+            "OLLAMA"
+          ],
+          "enumDescriptions": [
+            "OpenAI (official)",
+            "OpenAI-compatible (vLLM, LM Studio, Together AI, etc.)",
+            "Ollama (local, no API key required)"
+          ],
+          "default": "OPENAI",
+          "description": "AI provider for code review generation"
+        },
+        "prPilot.openAiModel": {
+          "type": "string",
+          "default": "gpt-4o",
+          "description": "OpenAI model to use (e.g. gpt-4o, gpt-4-turbo)"
+        },
+        "prPilot.openAiCompatBaseUrl": {
+          "type": "string",
+          "default": "https://api.openai.com",
+          "description": "Base URL for OpenAI-compatible API endpoint"
+        },
+        "prPilot.openAiCompatModel": {
+          "type": "string",
+          "default": "gpt-4o",
+          "description": "Model name for OpenAI-compatible API"
+        },
+        "prPilot.ollamaBaseUrl": {
+          "type": "string",
+          "default": "http://localhost:11434",
+          "description": "Base URL for Ollama server"
+        },
+        "prPilot.ollamaModel": {
+          "type": "string",
+          "default": "llama3",
+          "description": "Ollama model name"
+        },
+        "prPilot.jiraBaseUrl": {
+          "type": "string",
+          "default": "",
+          "description": "JIRA Cloud base URL (e.g. https://yourcompany.atlassian.net)"
+        },
+        "prPilot.jiraEmail": {
+          "type": "string",
+          "default": "",
+          "description": "Atlassian account email for JIRA integration"
+        },
+        "prPilot.jiraIssueKeyPattern": {
+          "type": "string",
+          "default": "",
+          "description": "Regex pattern to match JIRA issue keys (leave blank for default [A-Z][A-Z0-9]+-\\d+)"
+        }
+      }
+    }
+  },
+  "scripts": {
+    "vscode:prepublish": "npm run compile",
+    "compile": "tsc -p ./",
+    "watch": "tsc -watch -p ./",
+    "pretest": "npm run compile",
+    "test": "vscode-test",
+    "package": "vsce package"
+  },
+  "devDependencies": {
+    "@types/vscode": "^1.85.0",
+    "@types/node": "^20.0.0",
+    "@typescript-eslint/eslint-plugin": "^7.0.0",
+    "@typescript-eslint/parser": "^7.0.0",
+    "eslint": "^8.57.0",
+    "typescript": "^5.4.0",
+    "@vscode/test-cli": "^0.0.9",
+    "@vscode/test-electron": "^2.3.9",
+    "@vscode/vsce": "^2.24.0"
+  }
+}

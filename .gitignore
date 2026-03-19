@@ -38,6 +38,8 @@ bin/
 
 ### VS Code ###
 .vscode/
+vscode-plugin/.vscode
+vscode-plugin/out
 
 ### Mac OS ###
 .DS_Store
