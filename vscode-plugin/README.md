@@ -1,16 +1,11 @@
 <div align="center">
 
 <!-- Replace with your actual banner image -->
-![PR Pilot Banner](https://raw.githubusercontent.com/vitiquest/pr-pilot/main/docs/assets/banner.png)
+![PR Pilot Banner](https://raw.githubusercontent.com/thedeveloperbhai/pr-pilot/main/docs/assets/banner.png)
 
 # PR Pilot for VS Code
 
 **AI-powered pull request reviews, right inside VS Code.**
-
-[![Version](https://img.shields.io/visual-studio-marketplace/v/vitiquest.pr-pilot?label=VS%20Code%20Marketplace&color=blue&logo=visual-studio-code)](https://marketplace.visualstudio.com/items?itemName=thedeveloperbhai.pr-pilot)
-[![Installs](https://img.shields.io/visual-studio-marketplace/i/vitiquest.pr-pilot?color=brightgreen)](https://marketplace.visualstudio.com/items?itemName=vitiquest.pr-pilot)
-[![Rating](https://img.shields.io/visual-studio-marketplace/r/vitiquest.pr-pilot)](https://marketplace.visualstudio.com/items?itemName=vitiquest.pr-pilot)
-[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://github.com/vitiquest/pr-pilot/blob/main/LICENSE)
 
 [📖 Documentation](https://thedeveloperbhai.github.io/pr-pilot/) · [🚀 Getting Started](https://thedeveloperbhai.github.io/pr-pilot/installation.html) · [⚙️ Configuration](https://thedeveloperbhai.github.io/pr-pilot/configuration.html) · [🐛 Report an Issue](https://github.com/thedeveloperbhai/pr-pilot/issues)
 
@@ -30,7 +25,7 @@ Supports **OpenAI**, any **OpenAI-compatible** endpoint (vLLM, LM Studio, Togeth
 Browse and filter all pull requests for the current repository directly in the Activity Bar. Filter by state (Open, Merged, Declined), search by ID or title, and select a PR in one click.
 
 <!-- Replace with actual screenshot -->
-![PR Browser Screenshot](https://raw.githubusercontent.com/vitiquest/pr-pilot/main/docs/images/screenshot-pr-browser.png)
+![PR Browser Screenshot](https://raw.githubusercontent.com/thedeveloperbhai/pr-pilot/main/docs/assets/AI Provider.png)
 
 ### 📂 Side-by-Side Diff Viewer
 Click any changed file to open it in VS Code's built-in diff editor with full syntax highlighting. ADDED, MODIFIED, DELETED, and RENAMED files are shown with colour-coded badges.
