@@ -62,7 +62,8 @@ export class AiReviewBuilder {
   async buildSummaryText(
     pr: PullRequest,
     info: RepoInfo,
-    onProgress?: (msg: string) => void
+    onProgress?: (msg: string) => void,
+    onChunk?: (delta: string, isThinking: boolean) => void
   ): Promise<string> {
     const report = (msg: string) => { if (onProgress) onProgress(msg); };
 
@@ -119,7 +120,7 @@ export class AiReviewBuilder {
     };
 
     const prompt = this.buildPrompt(pr, analyses, referencedAnalyses);
-    return this.aiClient.generateSummary(prompt, prContext);
+    return this.aiClient.generateSummary(prompt, prContext, onChunk);
   }
 
   private buildPrompt(

@@ -1,4 +1,4 @@
-import { httpPost } from '../utils/httpClient';
+import { httpPostStream } from '../utils/httpClient';
 import { Settings } from '../settings/Settings';
 import { SkillsService } from '../skills/SkillsService';
 
@@ -28,12 +28,54 @@ interface ChatMessage {
   content: string;
 }
 
-interface ChatCompletionResponse {
-  choices: Array<{ message: { content: string } }>;
+interface StreamDelta {
+  choices: Array<{ delta: { content?: string }; finish_reason?: string | null }>;
 }
 
 // Conservative connect timeout — kept fixed; read timeout is user-configurable.
 const CONNECT_TIMEOUT_MS = 60_000;
+
+/**
+ * Parses streamed text for <think>…</think> tags, which reasoning models
+ * (DeepSeek-R1, QwQ, etc.) emit to separate inner monologue from the final answer.
+ * Calls `emit(text, isThinking)` for each classified segment.
+ * Handles tags split across TCP chunks via `state.pending`.
+ */
+function processThinkDelta(
+  newText: string,
+  state: { inThink: boolean; pending: string },
+  emit: (text: string, isThinking: boolean) => void
+): void {
+  let text = state.pending + newText;
+  state.pending = '';
+
+  while (text.length > 0) {
+    const tag = state.inThink ? '</think>' : '<think>';
+    const idx = text.indexOf(tag);
+
+    if (idx === -1) {
+      // Tag not found yet — keep the tail that could be a partial match
+      const safeLen = safeEmitLength(text, tag);
+      if (safeLen > 0) { emit(text.slice(0, safeLen), state.inThink); }
+      state.pending = text.slice(safeLen);
+      return;
+    }
+
+    if (idx > 0) { emit(text.slice(0, idx), state.inThink); }
+    text = text.slice(idx + tag.length);
+    state.inThink = !state.inThink;
+  }
+}
+
+/** Returns the number of leading characters in `text` that are safe to emit
+ *  without risk of splitting a `tag` that starts at the very end. */
+function safeEmitLength(text: string, tag: string): number {
+  const maxCheck = Math.min(text.length, tag.length - 1);
+  for (let k = maxCheck; k >= 1; k--) {
+    if (text.endsWith(tag.slice(0, k))) { return text.length - k; }
+  }
+  return text.length;
+}
 
 /**
  * Multi-provider LLM client.
@@ -42,7 +84,11 @@ const CONNECT_TIMEOUT_MS = 60_000;
 export class OpenAIClient {
   constructor(private readonly skillsService: SkillsService) {}
 
-  async generateSummary(userPrompt: string, prContext?: PrContext): Promise<string> {
+  async generateSummary(
+    userPrompt: string,
+    prContext?: PrContext,
+    onChunk?: (delta: string, isThinking: boolean) => void
+  ): Promise<string> {
     const settings = Settings.instance;
     const start = Date.now();
     console.log(`[OpenAIClient] generateSummary start | provider=${settings.aiProvider}`);
@@ -51,13 +97,13 @@ export class OpenAIClient {
       let result: string;
       switch (settings.aiProvider) {
         case 'OPENAI':
-          result = await this.callOpenAi(userPrompt, prContext);
+          result = await this.callOpenAi(userPrompt, prContext, onChunk);
           break;
         case 'OPENAI_COMPATIBLE':
-          result = await this.callOpenAiCompatible(userPrompt, prContext);
+          result = await this.callOpenAiCompatible(userPrompt, prContext, onChunk);
           break;
         case 'OLLAMA':
-          result = await this.callOllama(userPrompt, prContext);
+          result = await this.callOllama(userPrompt, prContext, onChunk);
           break;
       }
       console.log(`[OpenAIClient] generateSummary success | elapsed=${Date.now() - start}ms`);
@@ -68,7 +114,7 @@ export class OpenAIClient {
     }
   }
 
-  private async callOpenAi(userPrompt: string, prContext?: PrContext): Promise<string> {
+  private async callOpenAi(userPrompt: string, prContext?: PrContext, onChunk?: (d: string, isThinking: boolean) => void): Promise<string> {
     const settings = Settings.instance;
     const apiKey = await settings.getOpenAiKey();
     if (!apiKey) {
@@ -78,11 +124,12 @@ export class OpenAIClient {
       'https://api.openai.com/v1/chat/completions',
       apiKey,
       settings.openAiModel || 'gpt-4o',
-      await this.buildMessages(userPrompt, prContext)
+      await this.buildMessages(userPrompt, prContext),
+      onChunk
     );
   }
 
-  private async callOpenAiCompatible(userPrompt: string, prContext?: PrContext): Promise<string> {
+  private async callOpenAiCompatible(userPrompt: string, prContext?: PrContext, onChunk?: (d: string, isThinking: boolean) => void): Promise<string> {
     const settings = Settings.instance;
     const apiKey = await settings.getOpenAiKey();
     let baseUrl = settings.openAiCompatBaseUrl.replace(/\/$/, '');
@@ -99,11 +146,12 @@ export class OpenAIClient {
       chatUrl,
       apiKey,
       settings.openAiCompatModel || 'gpt-4o',
-      await this.buildMessages(userPrompt, prContext)
+      await this.buildMessages(userPrompt, prContext),
+      onChunk
     );
   }
 
-  private async callOllama(userPrompt: string, prContext?: PrContext): Promise<string> {
+  private async callOllama(userPrompt: string, prContext?: PrContext, onChunk?: (d: string, isThinking: boolean) => void): Promise<string> {
     const settings = Settings.instance;
     const baseUrl = settings.ollamaBaseUrl.replace(/\/$/, '');
     if (!baseUrl) {
@@ -113,7 +161,8 @@ export class OpenAIClient {
       `${baseUrl}/v1/chat/completions`,
       '',  // Ollama requires no API key
       settings.ollamaModel || 'llama3',
-      await this.buildMessages(userPrompt, prContext)
+      await this.buildMessages(userPrompt, prContext),
+      onChunk
     );
   }
 
@@ -121,7 +170,8 @@ export class OpenAIClient {
     url: string,
     apiKey: string,
     model: string,
-    messages: ChatMessage[]
+    messages: ChatMessage[],
+    onChunk?: (delta: string, isThinking: boolean) => void
   ): Promise<string> {
     const readTimeoutMs = Settings.instance.aiReadTimeoutMs;
     const body = JSON.stringify({
@@ -129,6 +179,7 @@ export class OpenAIClient {
       messages,
       max_tokens: 4096,
       temperature: 0.3,
+      stream: true,
     });
 
     const headers: Record<string, string> = {
@@ -138,12 +189,37 @@ export class OpenAIClient {
       headers['Authorization'] = `Bearer ${apiKey}`;
     }
 
-    console.log(`[OpenAIClient] POST ${url} | model=${model} | readTimeout=${readTimeoutMs}ms`);
+    console.log(`[OpenAIClient] POST ${url} | model=${model} | readTimeout=${readTimeoutMs}ms | stream=true`);
 
-    let responseText: string;
+    let accumulated = '';
+    let buffer = '';  // holds incomplete SSE lines between TCP chunks
+    const thinkState = { inThink: false, pending: '' };
+
     try {
-      responseText = await httpPost(url, body, headers, readTimeoutMs);
-      console.log(`[OpenAIClient] Raw response (first 500 chars): ${responseText.slice(0, 500)}`);
+      await httpPostStream(url, body, headers, (raw: string) => {
+        buffer += raw;
+        const lines = buffer.split('\n');
+        buffer = lines.pop() ?? '';  // keep last (possibly incomplete) line
+
+        for (const line of lines) {
+          const trimmed = line.trim();
+          if (!trimmed.startsWith('data:')) { continue; }
+          const payload = trimmed.slice(5).trim();
+          if (payload === '[DONE]') { continue; }
+          try {
+            const chunk: StreamDelta = JSON.parse(payload);
+            const delta = chunk.choices?.[0]?.delta?.content ?? '';
+            if (delta) {
+              processThinkDelta(delta, thinkState, (text, isThinking) => {
+                if (!isThinking) { accumulated += text; }
+                onChunk?.(text, isThinking);
+              });
+            }
+          } catch {
+            // Ignore malformed SSE lines
+          }
+        }
+      }, readTimeoutMs);
     } catch (err: unknown) {
       const msg = err instanceof Error ? err.message : String(err);
       console.error(`[OpenAIClient] HTTP error: ${msg}`);
@@ -172,17 +248,11 @@ export class OpenAIClient {
       throw err instanceof Error ? err : new Error(msg);
     }
 
-    const parsed: ChatCompletionResponse | null = JSON.parse(responseText);
-    console.log(`[OpenAIClient] Parsed response:`, JSON.stringify(parsed, null, 2).slice(0, 800));
-    if (!parsed) {
-      throw new Error(`Null response from AI.\nFull response:\n${responseText.slice(0, 500)}`);
+    if (!accumulated) {
+      throw new Error('Empty response from AI — no content tokens were streamed.');
     }
-    const content = parsed.choices?.[0]?.message?.content;
-    console.log(`[OpenAIClient] Extracted content (first 200 chars): ${content?.slice(0, 200)}`);
-    if (!content) {
-      throw new Error(`Empty response from AI (choices list was empty).\nFull response:\n${responseText.slice(0, 500)}`);
-    }
-    return content;
+    console.log(`[OpenAIClient] Stream complete | total chars=${accumulated.length}`);
+    return accumulated;
   }
 
   /**

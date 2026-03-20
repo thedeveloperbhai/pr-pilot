@@ -139,18 +139,23 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
           async (progress) => {
             progress.report({ message: 'Starting…' });
             try {
-              const rawText = await builder.buildSummaryText(item.pr, repoInfo, (msg) => {
-                progress.report({ message: msg });
-              });
-              const result = builder.parseResponse(rawText);
-              AiReviewPanel.show(
+              // Open the panel immediately in streaming mode
+              const panel = AiReviewPanel.showStreaming(
                 context.extensionUri,
                 item.pr,
                 repoInfo,
-                result,
                 service,
                 generateReview
               );
+
+              const rawText = await builder.buildSummaryText(
+                item.pr,
+                repoInfo,
+                (msg) => { progress.report({ message: msg }); },
+                (delta, isThinking) => { panel.appendChunk(delta, isThinking); }
+              );
+              const result = builder.parseResponse(rawText);
+              panel.finalizeStream(result);
             } catch (err: unknown) {
               vscode.window.showErrorMessage(`AI review failed: ${errorMessage(err)}`);
             }

@@ -13,14 +13,15 @@ export class AiReviewPanel {
   static currentPanel: AiReviewPanel | undefined;
   private readonly _panel: vscode.WebviewPanel;
   private _disposables: vscode.Disposable[] = [];
+  private _streaming = false;
 
   private constructor(
     panel: vscode.WebviewPanel,
-    private readonly pr: PullRequest,
-    private readonly repoInfo: RepoInfo,
-    private readonly reviewResult: AiReviewResult,
-    private readonly service: PullRequestService,
-    private readonly onRegenerate: () => Promise<void>
+    private pr: PullRequest,
+    private repoInfo: RepoInfo,
+    private reviewResult: AiReviewResult,
+    private service: PullRequestService,
+    private onRegenerate: () => Promise<void>
   ) {
     this._panel = panel;
     this._panel.webview.html = this.getHtml();
@@ -30,6 +31,41 @@ export class AiReviewPanel {
       null,
       this._disposables
     );
+  }
+
+  /**
+   * Opens (or reveals) the panel immediately in streaming mode, showing
+   * a thinking indicator before any tokens arrive.
+   */
+  static showStreaming(
+    extensionUri: vscode.Uri,
+    pr: PullRequest,
+    repoInfo: RepoInfo,
+    service: PullRequestService,
+    onRegenerate: () => Promise<void>
+  ): AiReviewPanel {
+    const placeholder: AiReviewResult = { summary: '', inlineComments: [] };
+    const instance = AiReviewPanel.show(extensionUri, pr, repoInfo, placeholder, service, onRegenerate);
+    instance._streaming = true;
+    instance._panel.webview.postMessage({ command: 'streamStart' });
+    return instance;
+  }
+
+  /** Appends a streamed delta to the live summary view. */
+  appendChunk(delta: string, isThinking: boolean): void {
+    this._panel.webview.postMessage({ command: 'streamChunk', delta, isThinking });
+  }
+
+  /** Finalises streaming: replaces the live text with the fully parsed result. */
+  finalizeStream(result: AiReviewResult): void {
+    this._streaming = false;
+    this.reviewResult = result;
+    this._panel.webview.postMessage({
+      command: 'streamDone',
+      summaryHtml: markdownToHtml(result.summary),
+      commentsJson: JSON.stringify(result.inlineComments),
+      commentCount: result.inlineComments.length,
+    });
   }
 
   static show(
@@ -66,9 +102,9 @@ export class AiReviewPanel {
   }
 
   update(pr: PullRequest, result: AiReviewResult, onRegenerate: () => Promise<void>): void {
-    (this as any).pr = pr;
-    (this as any).reviewResult = result;
-    (this as any).onRegenerate = onRegenerate;
+    this.pr = pr;
+    this.reviewResult = result;
+    this.onRegenerate = onRegenerate;
     this._panel.title = `AI Review — PR #${pr.id}`;
     this._panel.webview.html = this.getHtml();
   }
@@ -304,6 +340,67 @@ export class AiReviewPanel {
     .summary th { background: var(--vscode-editor-selectionBackground); }
     .summary hr { border: none; border-top: 1px solid var(--vscode-panel-border); margin: 16px 0; }
 
+    /* Streaming */
+    .stream-thinking {
+      color: var(--vscode-descriptionForeground);
+      font-style: italic;
+      animation: pulse 1.2s ease-in-out infinite;
+    }
+    @keyframes pulse { 0%,100% { opacity: 1; } 50% { opacity: 0.4; } }
+    .stream-pre {
+      white-space: pre-wrap;
+      word-break: break-word;
+      font-family: var(--vscode-editor-font-family, monospace);
+      font-size: 0.9em;
+      line-height: 1.6;
+      background: transparent;
+      padding: 0;
+    }
+    .stream-cursor {
+      display: inline-block;
+      width: 2px;
+      height: 1.1em;
+      background: var(--vscode-foreground);
+      margin-left: 2px;
+      vertical-align: text-bottom;
+      animation: blink 0.8s step-start infinite;
+    }
+    @keyframes blink { 0%,100% { opacity: 1; } 50% { opacity: 0; } }
+
+    /* Thinking (reasoning token) box */
+    .thinking-section {
+      margin-bottom: 12px;
+      border: 1px solid var(--vscode-panel-border);
+      border-radius: 6px;
+      overflow: hidden;
+    }
+    .thinking-section details > summary {
+      list-style: none;
+      cursor: pointer;
+      padding: 6px 12px;
+      font-size: 12px;
+      font-weight: 600;
+      color: var(--vscode-descriptionForeground);
+      background: var(--vscode-editor-inactiveSelectionBackground);
+      user-select: none;
+    }
+    .thinking-section details > summary::-webkit-details-marker { display: none; }
+    .thinking-section details > summary::before { content: '▶ '; font-size: 10px; }
+    .thinking-section details[open] > summary::before { content: '▼ '; }
+    .thinking-pre {
+      margin: 0;
+      padding: 10px 12px;
+      font-family: var(--vscode-editor-font-family, monospace);
+      font-size: 0.85em;
+      line-height: 1.55;
+      white-space: pre-wrap;
+      word-break: break-word;
+      max-height: 300px;
+      overflow-y: auto;
+      color: var(--vscode-descriptionForeground);
+      background: transparent;
+    }
+
     /* Inline comment cards */
     .comment-card {
       background: var(--vscode-editor-inactiveSelectionBackground);
@@ -468,7 +565,55 @@ export class AiReviewPanel {
 
   <script>
     const vscode = acquireVsCodeApi();
-    const allComments = ${commentsJson};
+    let allComments = ${commentsJson};
+    let streamBuffer = '';
+
+    // ── Streaming support ──────────────────────────────────────────────────
+    window.addEventListener('message', (event) => {
+      const msg = event.data;
+
+      if (msg.command === 'streamStart') {
+        streamBuffer = '';
+        const summaryEl = document.querySelector('#tab-summary .summary');
+        if (summaryEl) {
+          summaryEl.innerHTML = '<span class="stream-thinking">🤔 Thinking…</span>';
+        }
+        // disable action buttons while streaming
+        document.querySelectorAll('.action-bar button').forEach(b => b.disabled = true);
+        document.getElementById('loadingOverlay').classList.remove('active');
+      }
+
+      if (msg.command === 'streamChunk') {
+        streamBuffer += msg.delta;
+        const summaryEl = document.querySelector('#tab-summary .summary');
+        if (summaryEl) {
+          // Render plain-text with a blinking cursor while streaming
+          summaryEl.innerHTML =
+            '<pre class="stream-pre">' + escapeHtml(streamBuffer) + '</pre>' +
+            '<span class="stream-cursor"></span>';
+          summaryEl.scrollTop = summaryEl.scrollHeight;
+        }
+      }
+
+      if (msg.command === 'streamDone') {
+        // Replace plain-text with fully rendered markdown
+        const summaryEl = document.querySelector('#tab-summary .summary');
+        if (summaryEl) { summaryEl.innerHTML = msg.summaryHtml; }
+
+        // Update inline-comments tab
+        allComments = JSON.parse(msg.commentsJson);
+        renderComments();
+        const tab = document.querySelectorAll('.tab')[1];
+        if (tab) { tab.textContent = '💬 Inline Comments (' + msg.commentCount + ')'; }
+
+        // re-enable action buttons
+        document.querySelectorAll('.action-bar button').forEach(b => b.disabled = false);
+      }
+
+      if (msg.command === 'setLoading') {
+        document.getElementById('loadingOverlay').classList.toggle('active', msg.loading);
+      }
+    });
 
     function showTab(name) {
       document.querySelectorAll('.tab').forEach((t, i) => {
@@ -542,13 +687,6 @@ export class AiReviewPanel {
     function openUrl(url) {
       vscode.postMessage({ command: 'openUrl', text: url });
     }
-
-    window.addEventListener('message', (event) => {
-      const msg = event.data;
-      if (msg.command === 'setLoading') {
-        document.getElementById('loadingOverlay').classList.toggle('active', msg.loading);
-      }
-    });
 
     renderComments();
   </script>

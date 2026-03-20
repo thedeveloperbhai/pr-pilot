@@ -166,3 +166,64 @@ export async function httpPatch(
   }
   return resp.body;
 }
+
+/**
+ * Performs a streaming HTTP POST, calling `onChunk` for each raw data chunk received.
+ * Resolves when the stream ends. Rejects on non-2xx status or network error.
+ */
+export function httpPostStream(
+  urlStr: string,
+  body: string,
+  headers: Record<string, string> = {},
+  onChunk: (chunk: string) => void,
+  timeout = 900_000
+): Promise<void> {
+  return new Promise((resolve, reject) => {
+    let parsed: URL;
+    try {
+      parsed = new URL(urlStr);
+    } catch {
+      reject(new Error(`Invalid URL: ${urlStr}`));
+      return;
+    }
+
+    const isHttps = parsed.protocol === 'https:';
+    const lib = isHttps ? https : http;
+
+    const reqOptions: https.RequestOptions = {
+      hostname: parsed.hostname,
+      port: parsed.port ? parseInt(parsed.port) : (isHttps ? 443 : 80),
+      path: parsed.pathname + parsed.search,
+      method: 'POST',
+      headers: { ...headers, 'Content-Type': 'application/json' },
+    };
+
+    const req = lib.request(reqOptions, (res) => {
+      if ((res.statusCode ?? 0) < 200 || (res.statusCode ?? 0) >= 300) {
+        let errBody = '';
+        res.on('data', (c: Buffer) => { errBody += c.toString(); });
+        res.on('end', () => reject(new Error(`HTTP ${res.statusCode}: ${errBody.slice(0, 500)}`)));
+        return;
+      }
+      res.on('data', (chunk: Buffer) => { onChunk(chunk.toString()); });
+      res.on('end', resolve);
+      res.on('error', reject);
+    });
+
+    let timedOut = false;
+    req.on('error', (err) => {
+      if (timedOut) { return; }
+      reject(err);
+    });
+
+    const timer = setTimeout(() => {
+      timedOut = true;
+      req.destroy();
+      reject(new Error(`Request timeout after ${timeout}ms: ${urlStr}`));
+    }, timeout);
+
+    req.on('close', () => clearTimeout(timer));
+    req.write(body, 'utf8');
+    req.end();
+  });
+}
