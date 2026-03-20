@@ -25,13 +25,13 @@ Supports **OpenAI**, any **OpenAI-compatible** endpoint (vLLM, LM Studio, Togeth
 Browse and filter all pull requests for the current repository directly in the Activity Bar. Filter by state (Open, Merged, Declined), search by ID or title, and select a PR in one click.
 
 <!-- Replace with actual screenshot -->
-![PR Browser Screenshot](https://raw.githubusercontent.com/thedeveloperbhai/pr-pilot/main/docs/assets/AI Provider.png)
+![PR Browser Screenshot](https://raw.githubusercontent.com/thedeveloperbhai/pr-pilot/main/docs/assets/PR_List_View.png)
 
 ### 📂 Side-by-Side Diff Viewer
 Click any changed file to open it in VS Code's built-in diff editor with full syntax highlighting. ADDED, MODIFIED, DELETED, and RENAMED files are shown with colour-coded badges.
 
 <!-- Replace with actual screenshot -->
-![Diff Viewer Screenshot](https://raw.githubusercontent.com/vitiquest/pr-pilot/main/docs/images/screenshot-diff.png)
+![Diff Viewer Screenshot](https://raw.githubusercontent.com/thedeveloperbhai/pr-pilot/main/docs/assets/Diff_Viewer.png)
 
 ### 🤖 AI Code Review
 Generate a comprehensive AI review report with a single click. The report includes:
@@ -41,13 +41,15 @@ Generate a comprehensive AI review report with a single click. The report includ
 - **Summary Table** — consolidated list of all identified issues
 
 <!-- Replace with actual screenshot -->
-![AI Review Screenshot](https://raw.githubusercontent.com/vitiquest/pr-pilot/main/docs/images/screenshot-ai-review.png)
+![AI Review Screenshot](https://raw.githubusercontent.com/thedeveloperbhai/pr-pilot/main/docs/assets/Review_changes.png)
+![AI Review Screenshot](https://raw.githubusercontent.com/thedeveloperbhai/pr-pilot/main/docs/assets/Inline_Comments.png)
 
 ### ✅ PR Actions
 Approve, merge, or decline pull requests without leaving VS Code. When Jira is configured, review outcomes are automatically synced back to the linked Jira issue.
 
 ### 🎯 Skills & Prompt Customisation
 Control exactly how the AI reviews your code using plain Markdown skill files committed to your repository. Your whole team shares the same review standards automatically.
+![AI Review Screenshot](https://raw.githubusercontent.com/thedeveloperbhai/pr-pilot/main/docs/assets/Review_changes.png)
 
 ```
 .vscode/
@@ -58,7 +60,7 @@ Control exactly how the AI reviews your code using plain Markdown skill files co
         └── coding_standards.md   # Your team's style guide and architecture rules
 ```
 
-📖 [Full Skills Guide →](https://vitiquest.github.io/pr-pilot/skills.html)
+📖 [Full Skills Guide →](https://thedeveloperbhai.github.io/pr-pilot/skills.html)
 
 ---
 
@@ -89,6 +91,7 @@ Control exactly how the AI reviews your code using plain Markdown skill files co
 ## ⚙️ Configuration
 
 All settings are managed in the **PR Pilot Settings panel** (accessible via the gear icon or `PR Pilot: Open Settings`). Sensitive tokens are stored in VS Code's encrypted SecretStorage — never in `settings.json`.
+![Configuration](https://raw.githubusercontent.com/thedeveloperbhai/pr-pilot/main/docs/assets/Bitbucket_Config.png)
 
 ### Git Providers
 
@@ -102,13 +105,17 @@ All settings are managed in the **PR Pilot Settings panel** (accessible via the 
 
 ### AI Providers
 
+![AI Providers](https://raw.githubusercontent.com/thedeveloperbhai/pr-pilot/main/docs/assets/AI_Provider.png)
+
 | Provider | Setup |
 |---|---|
 | **OpenAI** | Enter your API key (`sk-…`). Default model: `gpt-4o` |
 | **OpenAI-compatible** | Enter a Base URL. Works with vLLM, LM Studio, Together AI, Groq, Anyscale |
 | **Ollama** | Enter your server address. Default: `http://localhost:11434` |
 
+
 ### Jira Integration *(optional)*
+![JIRA Integration](https://raw.githubusercontent.com/thedeveloperbhai/pr-pilot/main/docs/assets/JIRA_Provider.png)
 
 | Field | Description |
 |---|---|
@@ -117,7 +124,7 @@ All settings are managed in the **PR Pilot Settings panel** (accessible via the 
 | API Token | Generate at [id.atlassian.com](https://id.atlassian.com) → Security → API tokens |
 | Issue Key Pattern | Regex to match issue keys in PR data (default: `[A-Z][A-Z0-9]+-\d+`) |
 
-📖 [Full Configuration Guide →](https://vitiquest.github.io/pr-pilot/configuration.html)
+📖 [Full Configuration Guide →](https://thedeveloperbhai.github.io/pr-pilot/configuration.html)
 
 ---
 
@@ -150,15 +157,13 @@ Open the Command Palette (`⌘⇧P` / `Ctrl+Shift+P`) and search for **PR Pilot*
 
 ## 📚 Documentation
 
-Full documentation is available at **[vitiquest.github.io/pr-pilot](https://vitiquest.github.io/pr-pilot/)**:
-
 | Guide | Description |
 |---|---|
-| [Installation](https://vitiquest.github.io/pr-pilot/installation.html) | Install from Marketplace, VSIX, or build from source |
-| [Configuration](https://vitiquest.github.io/pr-pilot/configuration.html) | Git providers, AI settings, Jira integration |
-| [Skills & Prompts](https://vitiquest.github.io/pr-pilot/skills.html) | Customise AI review behaviour per project |
-| [Features](https://vitiquest.github.io/pr-pilot/features.html) | Complete feature reference |
-| [Changelog](https://vitiquest.github.io/pr-pilot/changelog.html) | Version history and release notes |
+| [Installation](https://thedeveloperbhai.github.io/pr-pilot/installation.html) | Install from Marketplace, VSIX, or build from source |
+| [Configuration](https://thedeveloperbhai.github.io/pr-pilot/configuration.html) | Git providers, AI settings, Jira integration |
+| [Skills & Prompts](https://thedeveloperbhai.github.io/pr-pilot/skills.html) | Customise AI review behaviour per project |
+| [Features](https://thedeveloperbhai.github.io/pr-pilot/features.html) | Complete feature reference |
+| [Changelog](https://thedeveloperbhai.github.io/pr-pilot/changelog.html) | Version history and release notes |
 
 ---
 
@@ -166,13 +171,13 @@ Full documentation is available at **[vitiquest.github.io/pr-pilot](https://viti
 
 Contributions, bug reports, and feature requests are welcome!
 
-- [Open an issue](https://github.com/vitiquest/pr-pilot/issues)
-- [Submit a pull request](https://github.com/vitiquest/pr-pilot/pulls)
-- [View the source](https://github.com/vitiquest/pr-pilot)
+- [Open an issue](https://github.com/thedeveloperbhai/pr-pilot/issues)
+- [Submit a pull request](https://github.com/thedeveloperbhai/pr-pilot/pulls)
+- [View the source](https://github.com/thedeveloperbhai/pr-pilot)
 
 ---
 
 ## 📄 License
 
-Released under the [MIT License](https://github.com/vitiquest/pr-pilot/blob/main/LICENSE).  
+Released under the [MIT License](https://github.com/thedeveloperbhai/pr-pilot/blob/main/LICENSE).  
 © 2026 [Vitiquest](https://www.vitiquest.com)
