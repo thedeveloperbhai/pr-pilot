@@ -16,7 +16,6 @@
 **/out/
 **/!**/src/main/**/out/
 **/!**/src/test/**/out/
-**/
 **/### Eclipse ###
 **/.apt_generated
 **/.classpath
@@ -34,12 +33,11 @@
 **//nbbuild/
 **//dist/
 **//nbdist/
-**//.nb-gradle/
-**/
-**/### VS Code ###
+**/.nb-gradle/
+### VS Code ###
 **/.vscode/
 **/vscode-plugin/.vscode
 **/vscode-plugin/out
 **/node_modules
-**/### Mac OS ###
+### Mac OS ###
 **/.DS_Store
